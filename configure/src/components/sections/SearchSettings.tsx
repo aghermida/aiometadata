@@ -816,7 +816,7 @@ export function SearchSettings() {
                                     <div className="flex gap-2 w-full sm:w-auto">
                                         <Input
                                             id="ollama-url"
-                                            value={config.apiKeys?.ollamaUrl ?? 'http://host.docker.internal:11434'}
+                                            value={config.apiKeys?.ollamaUrl ?? 'http://ollama:11434'}
                                             onChange={(e) => {
                                                 setConfig(prev => ({
                                                     ...prev,
@@ -824,7 +824,7 @@ export function SearchSettings() {
                                                 }));
                                                 setOllamaModels([]);
                                             }}
-                                            placeholder="http://host.docker.internal:11434"
+                                            placeholder="http://ollama:11434"
                                             className="flex-1 sm:w-[200px]"
                                         />
                                         <Button
