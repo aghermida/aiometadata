@@ -160,7 +160,7 @@ export function SearchSettings() {
   }, [config.apiKeys?.openrouter]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fetchOllamaModels = () => {
-    const url = config.apiKeys?.ollamaUrl || 'http://host.docker.internal:11434';
+    const url = config.apiKeys?.ollamaUrl || 'http://ollama:11434';
     setOllamaModelsLoading(true);
     fetch(`/api/ollama/models?url=${encodeURIComponent(url)}`)
       .then(res => res.json())
