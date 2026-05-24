@@ -128,6 +128,8 @@ export function SearchSettings() {
   const [openRouterModels, setOpenRouterModels] = useState<AIModel[]>([]);
   const [openRouterModelsLoading, setOpenRouterModelsLoading] = useState(false);
   const openRouterKeyRef = React.useRef(config.apiKeys?.openrouter);
+  const [ollamaModels, setOllamaModels] = useState<{ id: string; name: string }[]>([]);
+  const [ollamaModelsLoading, setOllamaModelsLoading] = useState(false);
 
   // Fetch OpenRouter model list when key is available
   useEffect(() => {
@@ -156,6 +158,16 @@ export function SearchSettings() {
       .finally(() => { if (!cancelled) setOpenRouterModelsLoading(false); });
     return () => { cancelled = true; };
   }, [config.apiKeys?.openrouter]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const fetchOllamaModels = () => {
+    const url = config.apiKeys?.ollamaUrl || 'http://host.docker.internal:11434';
+    setOllamaModelsLoading(true);
+    fetch(`/api/ollama/models?url=${encodeURIComponent(url)}`)
+      .then(res => res.json())
+      .then(data => setOllamaModels(data?.models || []))
+      .catch(() => setOllamaModels([]))
+      .finally(() => setOllamaModelsLoading(false));
+  };
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
@@ -792,7 +804,7 @@ export function SearchSettings() {
                                 </Select>
                             </div>
 
-                            {/* Ollama URL input */}
+                            {/* Ollama URL input + fetch button */}
                             {(config.search.ai_provider || 'gemini') === 'ollama' && (
                                 <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 sm:gap-4">
                                     <div className="min-w-0">
@@ -801,16 +813,30 @@ export function SearchSettings() {
                                             Endpoint compatible con OpenAI (<code>/v1</code> se añade automáticamente si falta)
                                         </p>
                                     </div>
-                                    <Input
-                                        id="ollama-url"
-                                        value={config.apiKeys?.ollamaUrl ?? 'http://host.docker.internal:11434'}
-                                        onChange={(e) => setConfig(prev => ({
-                                            ...prev,
-                                            apiKeys: { ...prev.apiKeys, ollamaUrl: e.target.value }
-                                        }))}
-                                        placeholder="http://host.docker.internal:11434"
-                                        className="w-full sm:w-[280px]"
-                                    />
+                                    <div className="flex gap-2 w-full sm:w-auto">
+                                        <Input
+                                            id="ollama-url"
+                                            value={config.apiKeys?.ollamaUrl ?? 'http://host.docker.internal:11434'}
+                                            onChange={(e) => {
+                                                setConfig(prev => ({
+                                                    ...prev,
+                                                    apiKeys: { ...prev.apiKeys, ollamaUrl: e.target.value }
+                                                }));
+                                                setOllamaModels([]);
+                                            }}
+                                            placeholder="http://host.docker.internal:11434"
+                                            className="flex-1 sm:w-[200px]"
+                                        />
+                                        <Button
+                                            type="button"
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={fetchOllamaModels}
+                                            disabled={ollamaModelsLoading}
+                                        >
+                                            {ollamaModelsLoading ? 'Cargando...' : 'Consultar'}
+                                        </Button>
+                                    </div>
                                 </div>
                             )}
 
@@ -847,13 +873,31 @@ export function SearchSettings() {
                                         </datalist>
                                     </>
                                 ) : (config.search.ai_provider || 'gemini') === 'ollama' ? (
-                                    <Input
-                                        id="ai-model"
-                                        value={config.search.ai_model ?? ''}
-                                        onChange={(e) => handleAiModelChange(e.target.value)}
-                                        placeholder="llama3.2, phi4, mistral, gemma3, qwen2.5..."
-                                        className="w-full sm:w-[280px]"
-                                    />
+                                    ollamaModels.length > 0 ? (
+                                        <Select
+                                            value={config.search.ai_model ?? ''}
+                                            onValueChange={handleAiModelChange}
+                                        >
+                                            <SelectTrigger id="ai-model" className="w-full sm:w-[280px]">
+                                                <SelectValue placeholder={ollamaModelsLoading ? 'Cargando modelos...' : 'Selecciona un modelo'} />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                                {ollamaModels.map(model => (
+                                                    <SelectItem key={model.id} value={model.id}>
+                                                        {model.name}
+                                                    </SelectItem>
+                                                ))}
+                                            </SelectContent>
+                                        </Select>
+                                    ) : (
+                                        <Input
+                                            id="ai-model"
+                                            value={config.search.ai_model ?? ''}
+                                            onChange={(e) => handleAiModelChange(e.target.value)}
+                                            placeholder={ollamaModelsLoading ? 'Cargando modelos...' : 'llama3.2, phi4, mistral...'}
+                                            className="w-full sm:w-[280px]"
+                                        />
+                                    )
                                 ) : (
                                     <Select
                                         value={config.search.ai_model || DEFAULT_GEMINI_MODEL}
