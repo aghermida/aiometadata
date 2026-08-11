@@ -8,6 +8,16 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -45,9 +55,10 @@ import {
   useUpdateSetting,
   useResetSetting,
 } from "@/hooks/useDashboardQueries";
+import { RestartManager } from "./RestartManager";
 
 interface DashboardSettingsProps {
-  data: { settings: SettingItem[] } | null | undefined;
+  data: { settings: SettingItem[]; canRestart?: boolean; bootId?: string } | null | undefined;
 }
 
 const CATEGORY_ICONS: Record<string, React.ReactNode> = {
@@ -81,7 +92,7 @@ const CATEGORY_DESCRIPTIONS: Record<string, string> = {
 };
 
 const CATEGORY_ORDER = [
-  "API Keys", "OAuth", "Cache", "Features",
+  "API Keys", "OAuth", "MovieLens", "Cache", "Features",
   "Essential Warming", "Comprehensive Warming", "MAL Warming",
   "Rate Limiting", "Data Updates", "Proxy", "Diagnostics", "Server",
 ];
@@ -148,7 +159,7 @@ function TagsInput({
 
   return (
     <div
-      className={`flex flex-wrap items-center gap-1.5 min-h-[2rem] rounded-md border border-input bg-background px-2 py-1 w-72 ${
+      className={`flex flex-wrap items-center gap-1.5 min-h-[2rem] rounded-md border border-input bg-background px-2 py-1 flex-1 min-w-0 sm:flex-none sm:w-72 ${
         disabled ? "opacity-50 pointer-events-none" : ""
       }`}
       onClick={() => inputRef.current?.focus()}
@@ -195,6 +206,9 @@ function SettingRow({ setting }: { setting: SettingItem }) {
   const [localValue, setLocalValue] = useState(setting.value);
   const [revealed, setRevealed] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [pendingConfirm, setPendingConfirm] = useState<
+    { kind: "update"; value: string; reason: string } | { kind: "reset"; reason: string } | null
+  >(null);
   const updateMutation = useUpdateSetting();
   const resetMutation = useResetSetting();
   const prevServerValue = useRef(setting.value);
@@ -212,14 +226,22 @@ function SettingRow({ setting }: { setting: SettingItem }) {
     : "";
   const displayValue = setting.sensitive && !revealed && !hasChanged ? maskedValue : localValue;
 
+  function needsConfirmation(err: any, pending: { kind: "update"; value: string } | { kind: "reset" }): boolean {
+    if (!err?.requiresConfirmation) return false;
+    setPendingConfirm({ ...pending, reason: err.reason || "This change affects your own access." });
+    return true;
+  }
+
   async function handleSave() {
     setSaving(true);
     try {
       await updateMutation.mutateAsync({ key: setting.key, value: localValue });
       toast.success(`${setting.label} updated`);
     } catch (err: any) {
-      toast.error(err.message || "Failed to save");
-      setLocalValue(setting.value);
+      if (!needsConfirmation(err, { kind: "update", value: localValue })) {
+        toast.error(err.message || "Failed to save");
+        setLocalValue(setting.value);
+      }
     } finally {
       setSaving(false);
     }
@@ -227,10 +249,30 @@ function SettingRow({ setting }: { setting: SettingItem }) {
 
   async function handleReset() {
     try {
-      await resetMutation.mutateAsync(setting.key);
+      await resetMutation.mutateAsync({ key: setting.key });
       toast.success(`${setting.label} reset to default`);
     } catch (err: any) {
-      toast.error(err.message || "Failed to reset");
+      if (!needsConfirmation(err, { kind: "reset" })) {
+        toast.error(err.message || "Failed to reset");
+      }
+    }
+  }
+
+  async function handleConfirmed() {
+    if (!pendingConfirm) return;
+    const pending = pendingConfirm;
+    setPendingConfirm(null);
+    try {
+      if (pending.kind === "update") {
+        await updateMutation.mutateAsync({ key: setting.key, value: pending.value, confirm: true });
+        toast.success(`${setting.label} updated`);
+      } else {
+        await resetMutation.mutateAsync({ key: setting.key, confirm: true });
+        toast.success(`${setting.label} reset to default`);
+      }
+    } catch (err: any) {
+      toast.error(err.message || "Failed to save");
+      setLocalValue(setting.value);
     }
   }
 
@@ -242,7 +284,7 @@ function SettingRow({ setting }: { setting: SettingItem }) {
   }
 
   return (
-    <div className={`flex items-start gap-4 py-4 border-b border-border/50 last:border-0 transition-opacity ${isDisabled ? "opacity-40" : ""}`}>
+    <div className={`flex flex-col gap-2 sm:flex-row sm:items-start sm:gap-4 py-4 border-b border-border/50 last:border-0 transition-opacity ${isDisabled ? "opacity-40" : ""}`}>
       <div className="flex-1 min-w-0 space-y-1">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="font-medium text-sm">{setting.label}</span>
@@ -288,9 +330,9 @@ function SettingRow({ setting }: { setting: SettingItem }) {
         </p>
       </div>
 
-      <div className="flex items-center gap-2 shrink-0">
+      <div className="flex items-center gap-2 w-full sm:w-auto sm:shrink-0">
         {setting.uiHint === "tags" ? (
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 w-full sm:w-auto">
             <TagsInput
               value={localValue}
               onChange={setLocalValue}
@@ -316,6 +358,7 @@ function SettingRow({ setting }: { setting: SettingItem }) {
                 {
                   onSuccess: () => toast.success(`${setting.label} updated`),
                   onError: (err: any) => {
+                    if (needsConfirmation(err, { kind: "update", value: val })) return;
                     toast.error(err.message || "Failed to save");
                     setLocalValue(setting.value);
                   },
@@ -334,6 +377,7 @@ function SettingRow({ setting }: { setting: SettingItem }) {
                 {
                   onSuccess: () => toast.success(`${setting.label} updated`),
                   onError: (err: any) => {
+                    if (needsConfirmation(err, { kind: "update", value: val })) return;
                     toast.error(err.message || "Failed to save");
                     setLocalValue(setting.value);
                   },
@@ -341,7 +385,7 @@ function SettingRow({ setting }: { setting: SettingItem }) {
               );
             }}
           >
-            <SelectTrigger className="h-8 w-48 text-xs">
+            <SelectTrigger className="h-8 w-full sm:w-48 text-xs">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -353,8 +397,8 @@ function SettingRow({ setting }: { setting: SettingItem }) {
             </SelectContent>
           </Select>
         ) : (
-          <div className="flex items-center gap-1.5">
-            <div className="relative">
+          <div className="flex items-center gap-1.5 w-full sm:w-auto">
+            <div className="relative flex-1 min-w-0 sm:flex-none">
               <Input
                 type={setting.type === "number" ? "number" : "text"}
                 value={displayValue}
@@ -365,7 +409,7 @@ function SettingRow({ setting }: { setting: SettingItem }) {
                 }}
                 {...(setting.type === "number" && setting.min != null ? { min: setting.min } : {})}
                 {...(setting.type === "number" && setting.max != null ? { max: setting.max } : {})}
-                className={`h-8 w-48 text-xs font-mono ${setting.sensitive ? "pr-8" : ""}`}
+                className={`h-8 w-full sm:w-48 text-xs font-mono ${setting.sensitive ? "pr-8" : ""}`}
               />
               {setting.sensitive && (
                 <button
@@ -398,6 +442,26 @@ function SettingRow({ setting }: { setting: SettingItem }) {
           </Button>
         )}
       </div>
+
+      <AlertDialog open={pendingConfirm !== null} onOpenChange={(open) => { if (!open) setPendingConfirm(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Confirm this change</AlertDialogTitle>
+            <AlertDialogDescription>{pendingConfirm?.reason}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              onClick={() => {
+                setPendingConfirm(null);
+                setLocalValue(setting.value);
+              }}
+            >
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction onClick={handleConfirmed}>Save anyway</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
@@ -421,6 +485,11 @@ export function DashboardSettings({ data }: DashboardSettingsProps) {
     [grouped]
   );
 
+  const pendingLabels = useMemo(
+    () => settings.filter((s) => s.requiresRestart && s.changedSinceBoot).map((s) => s.label),
+    [settings]
+  );
+
   function scrollToCategory(cat: string) {
     setActiveCategory(cat);
     document.getElementById(`settings-cat-${cat}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -436,7 +505,9 @@ export function DashboardSettings({ data }: DashboardSettingsProps) {
   }
 
   return (
-    <div className="flex gap-6">
+    <div className="space-y-4">
+      <RestartManager pendingLabels={pendingLabels} canRestart={data?.canRestart} />
+      <div className="flex gap-6">
       <nav className="hidden lg:block w-52 shrink-0 sticky top-0 self-start space-y-1">
         {categories.map((cat) => (
           <button
@@ -476,6 +547,7 @@ export function DashboardSettings({ data }: DashboardSettingsProps) {
             </CardContent>
           </Card>
         ))}
+      </div>
       </div>
     </div>
   );

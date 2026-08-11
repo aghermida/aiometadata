@@ -1,6 +1,6 @@
 const axios: any = require('axios');
 const cheerio: any = require('cheerio');
-const { httpGet }: any = require('../utils/httpClient');
+const { httpGet, httpHead }: any = require('../utils/httpClient');
 const { cacheWrapGlobal }: any = require('./getCache');
 
 const imdbAxiosInstance = axios.create();
@@ -99,6 +99,35 @@ function getLogoFromImdb(imdbId: string): string | null {
         return null;
     }
     return `https://images.metahub.space/logo/medium/${imdbId}/img`;
+}
+
+async function metahubImageExists(imdbId: string, type: 'logo' | 'poster' | 'background' = 'logo'): Promise<boolean> {
+    let url: string | null = null;
+    if (type === 'logo') url = getLogoFromImdb(imdbId);
+    else if (type === 'poster') url = getPosterFromImdb(imdbId);
+    else if (type === 'background') url = getBackgroundFromImdb(imdbId);
+    if (!url) {
+        return false;
+    }
+    const ttl = parseInt(process.env.METAHUB_IMAGE_EXISTS_TTL_SECONDS || '86400', 10);
+    const errorTtl = parseInt(process.env.METAHUB_IMAGE_ERROR_TTL_SECONDS || '300', 10);
+    const timeout = parseInt(process.env.METAHUB_IMAGE_HEAD_TIMEOUT_MS || '4000', 10);
+    // array sentinel, not a bare boolean: bare booleans cache as EMPTY_RESULT (60s)
+    const cached = await cacheWrapGlobal(`metahub-image-exists:${type}:${imdbId}`, async () => {
+        try {
+            const res = await httpHead(url, { timeout });
+            return [res.status >= 200 && res.status < 300 ? 1 : 0];
+        } catch (error: any) {
+            const status = error?.response?.status;
+            return typeof status === 'number' ? [0] : [0, 'unknown'];
+        }
+    }, ttl, {
+        resultClassifier: (result: any) =>
+            Array.isArray(result) && result[1] === 'unknown'
+                ? { type: 'TEMPORARY_ERROR', ttl: errorTtl }
+                : { type: 'SUCCESS', ttl: null },
+    });
+    return Array.isArray(cached) ? cached[0] === 1 : !!cached;
 }
 
 function getBackgroundFromImdb(imdbId: string): string | null {
@@ -481,6 +510,7 @@ export {
     scrapeSingleImdbResultByTitle,
     getMetaFromImdbIo,
     getLogoFromImdb,
+    metahubImageExists,
     getBackgroundFromImdb,
     getPosterFromImdb
 };
@@ -489,6 +519,7 @@ module.exports = {
     scrapeSingleImdbResultByTitle,
     getMetaFromImdbIo,
     getLogoFromImdb,
+    metahubImageExists,
     getBackgroundFromImdb,
     getPosterFromImdb
 };

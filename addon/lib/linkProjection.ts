@@ -45,9 +45,13 @@ function canonicalizeLinksForCache(links: Link[]): Link[] {
   return links.map(link => rewriteLinkDiscoverManifestUrl(link, null));
 }
 
-function applyLinksUserScopeProjection(meta: any, config: { userUUID?: string | null }): any {
+function applyLinksUserScopeProjection(
+  meta: any,
+  config: { userUUID?: string | null; addonIdentifier?: string | null }
+): any {
   if (!Array.isArray(meta?.links)) return meta;
-  meta.links = meta.links.map((link: Link) => rewriteLinkDiscoverManifestUrl(link, config.userUUID));
+  const identifier = config.addonIdentifier || config.userUUID;
+  meta.links = meta.links.map((link: Link) => rewriteLinkDiscoverManifestUrl(link, identifier));
   return meta;
 }
 

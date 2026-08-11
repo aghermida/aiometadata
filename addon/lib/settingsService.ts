@@ -6,6 +6,7 @@ const database: any = require('./database');
 
 const cache = new Map<string, string>();
 const originalEnv = new Map<string, string | undefined>();
+const bootValues = new Map<string, string>();
 let initialized = false;
 
 export async function initializeSettings(): Promise<void> {
@@ -23,6 +24,9 @@ export async function initializeSettings(): Promise<void> {
       process.env[def.envVar] = value;
     }
   }
+  for (const def of SETTINGS_REGISTRY) {
+    bootValues.set(def.key, getSetting(def.key));
+  }
   initialized = true;
   logger.info(`Loaded ${rows.length} settings from database`);
 }
@@ -34,6 +38,16 @@ export function getSetting(key: string): string {
   if (def.envOnly && envVal) return envVal;
   const dbVal = cache.get(key);
   if (dbVal !== undefined) return dbVal;
+  if (envVal) return envVal;
+  return String(def.default);
+}
+
+export function previewSettingValue(key: string, value: string | null): string {
+  const def = getSettingDefinition(key);
+  if (!def) return '';
+  if (value !== null) return value;
+  const restored = originalEnv.has(def.envVar) ? originalEnv.get(def.envVar) : undefined;
+  const envVal = restored || (def.legacyEnvVar ? process.env[def.legacyEnvVar] : undefined);
   if (envVal) return envVal;
   return String(def.default);
 }
@@ -68,6 +82,7 @@ export async function setSetting(key: string, value: string): Promise<void> {
 export async function resetSetting(key: string): Promise<void> {
   const def = getSettingDefinition(key);
   if (!def) throw new Error(`Unknown setting: ${key}`);
+  if (def.envOnly) throw new Error(`Setting ${key} can only be configured via environment variable`);
 
   if (database.type === 'sqlite') {
     await database.runQuery('DELETE FROM addon_settings WHERE key = ?', [key]);
@@ -133,6 +148,9 @@ export function getAllSettings(): object[] {
       hasEnvVar,
       hasDbOverride,
       disabledReason,
+      changedSinceBoot: (def.requiresRestart ?? false)
+        && bootValues.has(def.key)
+        && String(currentValue) !== String(bootValues.get(def.key)),
     };
   });
 }

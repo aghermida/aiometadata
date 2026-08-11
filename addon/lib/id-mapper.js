@@ -20,14 +20,21 @@ function parsePositiveIntEnv(envValue, defaultValue, minValue = 1, maxValue = 10
 
 // from  https://github.com/Fribb/anime-lists
 const REMOTE_MAPPING_URL ='https://raw.githubusercontent.com/Fribb/anime-lists/refs/heads/master/anime-list-full.json';
-const REMOTE_KITSU_TO_IMDB_MAPPING_URL = 'https://raw.githubusercontent.com/TheBeastLT/stremio-kitsu-anime/bbf149474f610885629b95b1b9ce4408c3c1353d/static/data/imdb_mapping.json';
+// Startup mapping downloads only: a transient connect failure here degrades the
+// mapper for the whole process lifetime, so these are worth retrying.
+const { BOOTSTRAP_HTTP_OPTIONS: BOOTSTRAP_RETRY } = require('../utils/httpClient');
+const REMOTE_KITSU_TO_IMDB_MAPPING_URL = 'https://raw.githubusercontent.com/TheBeastLT/stremio-kitsu-anime/master/static/data/imdb_mapping.json';
 const REMOTE_TRAKT_ANIME_MOVIES_URL = 'https://github.com/rensetsu/db.trakt.extended-anitrakt/releases/download/latest/movies_ex.json';
+const REMOTE_ANIME_API_URL = 'https://raw.githubusercontent.com/nattadasu/animeApi/refs/heads/v3/database/animeapi.tsv';
 const LOCAL_CACHE_PATH = path.join(process.cwd(), 'addon', 'data', 'anime-list-full.json.cache');
 const LOCAL_KITSU_TO_IMDB_MAPPING_PATH = path.join(process.cwd(), 'addon', 'data', 'imdb_mapping.json.cache');
 const LOCAL_TRAKT_ANIME_MOVIES_PATH = path.join(process.cwd(), 'addon', 'data', 'trakt-anime-movies.json.cache');
-const REDIS_ETAG_KEY = 'anime-list-etag'; 
+const LOCAL_ANIME_API_PATH = path.join(process.cwd(), 'addon', 'data', 'animeapi.tsv.cache');
+const REDIS_ETAG_KEY = 'anime-list-etag';
 const REDIS_KITSU_TO_IMDB_ETAG_KEY = 'kitsu-to-imdb-etag';
 const REDIS_TRAKT_ANIME_MOVIES_ETAG_KEY = 'trakt-anime-movies-etag';
+const REDIS_ANIME_API_ETAG_KEY = 'anime-api-etag';
+const ANIME_API_OVERLAY_ENABLED = process.env.ANIME_API_OVERLAY_ENABLED !== 'false';
 const UPDATE_INTERVAL_HOURS = parsePositiveIntEnv(process.env.ANIME_LIST_UPDATE_INTERVAL_HOURS, 24); // Update every 24 hours (configurable)
 const UPDATE_INTERVAL_KITSU_TO_IMDB_HOURS = parsePositiveIntEnv(process.env.KITSU_TO_IMDB_UPDATE_INTERVAL_HOURS, 24); // Update every 24 hours (configurable)
 const UPDATE_INTERVAL_TRAKT_ANIME_MOVIES_HOURS = parsePositiveIntEnv(process.env.TRAKT_ANIME_MOVIES_UPDATE_INTERVAL_HOURS, 24); // Update every 24 hours (configurable)
@@ -52,6 +59,10 @@ const KITSU_TO_IMDB_CACHE_MAX_SIZE = parsePositiveIntEnv(
   100
 );
 
+let animeApiIndex = null;
+let animeApiRows = null;
+let animeApiRowCount = 0;
+let lastOverlayStats = null;
 let animeIdMap = new Map();
 let tvdbIdToAnimeListMap = new Map();
 let tmdbIdToAnimeListMap = new Map();
@@ -107,6 +118,298 @@ let tmdbIdToTraktMovieMap = new Map();
 let imdbIdToTraktMovieMap = new Map();
 
 
+function toIdList(value) {
+  const arr = Array.isArray(value) ? value : value != null ? [value] : [];
+  return arr.filter((id) => id !== null && id !== undefined && String(id).trim() !== '');
+}
+
+const ANIME_API_FIELDS = {
+  mal_id: 'myanimelist',
+  anilist_id: 'anilist',
+  kitsu_id: 'kitsu',
+  anidb_id: 'anidb',
+  simkl_id: 'simkl',
+  themoviedb_id: 'themoviedb',
+  tvdb_id: 'thetvdb',
+  imdb_id: 'imdb',
+};
+const ANIME_API_ANIME_IDS = ['mal_id', 'anilist_id', 'kitsu_id', 'anidb_id', 'simkl_id'];
+const ANIME_API_COLUMNS = ['anidb', 'anilist', 'kitsu', 'myanimelist', 'simkl', 'themoviedb', 'thetvdb', 'imdb', 'themoviedb_type', 'trakt_type'];
+
+function tsvValue(raw) {
+  if (!raw) return '';
+  const trimmed = raw.trim();
+  if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    return trimmed.slice(1, -1).replace(/""/g, '"');
+  }
+  return trimmed;
+}
+
+function parseAnimeApiTsv(text) {
+  const lines = String(text).split('\n');
+  const header = (lines[0] || '').split('\t').map(tsvValue);
+  const columns = {};
+  for (const name of ANIME_API_COLUMNS) {
+    columns[name] = header.indexOf(name);
+    if (columns[name] === -1) throw new Error(`animeApi TSV is missing the '${name}' column`);
+  }
+
+  const rows = [];
+  for (let i = 1; i < lines.length; i++) {
+    if (!lines[i]) continue;
+    const parts = lines[i].split('\t');
+    if (parts.length !== header.length) continue;
+
+    const numeric = (name) => {
+      const value = tsvValue(parts[columns[name]]);
+      if (!value) return null;
+      const parsed = Number.parseInt(value, 10);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+    const imdb = tsvValue(parts[columns.imdb]);
+
+    rows.push({
+      anidb: numeric('anidb'),
+      anilist: numeric('anilist'),
+      kitsu: numeric('kitsu'),
+      myanimelist: numeric('myanimelist'),
+      simkl: numeric('simkl'),
+      themoviedb: numeric('themoviedb'),
+      thetvdb: numeric('thetvdb'),
+      imdb: imdb.startsWith('tt') ? imdb : null,
+      type: animeApiType(tsvValue(parts[columns.themoviedb_type]), tsvValue(parts[columns.trakt_type])),
+    });
+  }
+  return rows;
+}
+
+function animeApiType(tmdbType, traktType) {
+  const type = (tmdbType || traktType || '').toLowerCase();
+  if (type === 'tv' || type === 'shows') return 'TV';
+  if (type === 'movie' || type === 'movies') return 'Movie';
+  return null;
+}
+
+function processAndIndexAnimeApi(text) {
+  const rows = parseAnimeApiTsv(text);
+  if (rows.length === 0) throw new Error('animeApi TSV parsed to zero rows');
+
+  const index = {};
+  for (const [, apiKey] of Object.entries(ANIME_API_FIELDS)) index[apiKey] = new Map();
+  for (const row of rows) {
+    for (const [, apiKey] of Object.entries(ANIME_API_FIELDS)) {
+      if (row[apiKey] != null && !index[apiKey].has(row[apiKey])) index[apiKey].set(row[apiKey], row);
+    }
+  }
+
+  animeApiIndex = index;
+  animeApiRows = rows;
+  animeApiRowCount = rows.length;
+}
+
+function tmdbIdsOf(item) {
+  const value = item.themoviedb_id;
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return [...toIdList(value.tv), ...toIdList(value.movie)];
+  }
+  return toIdList(value);
+}
+
+function contradicts(a, b) {
+  for (const fribbKey of Object.keys(ANIME_API_FIELDS)) {
+    const aValues = fieldValues(a, fribbKey);
+    const bValues = fieldValues(b, fribbKey);
+    if (aValues.length && bValues.length && !aValues.some(id => bValues.includes(id))) return true;
+  }
+  return false;
+}
+
+const ANIME_API_MATCH_ORDER = ['anidb_id', 'mal_id', 'anilist_id', 'kitsu_id', 'simkl_id', 'themoviedb_id', 'tvdb_id', 'imdb_id'];
+
+function findAnimeApiRow(item) {
+  for (const fribbKey of ANIME_API_MATCH_ORDER) {
+    const index = animeApiIndex[ANIME_API_FIELDS[fribbKey]];
+    for (const value of fieldValues(item, fribbKey)) {
+      const match = index.get(value);
+      if (match) return match;
+    }
+  }
+  return null;
+}
+
+function fieldValues(item, fribbKey) {
+  if (fribbKey === 'themoviedb_id') return tmdbIdsOf(item);
+  if (fribbKey === 'imdb_id') return toIdList(item.imdb_id);
+  return item[fribbKey] != null ? [item[fribbKey]] : [];
+}
+
+function isEmptyValue(value) {
+  return value === null || value === undefined || (Array.isArray(value) && value.length === 0);
+}
+
+function mergeEntryInto(primary, other) {
+  for (const [key, value] of Object.entries(other)) {
+    if (isEmptyValue(value)) continue;
+    if (isEmptyValue(primary[key])) primary[key] = value;
+  }
+}
+
+function enrichWithAnimeApi(animeList) {
+  if (!animeApiIndex) {
+    lastOverlayStats = null;
+    return animeList;
+  }
+
+  const stats = { rows: 0, merged: 0, added: 0, conflicts: 0, rejected: 0 };
+  const fields = Object.entries(ANIME_API_FIELDS);
+  for (const [fribbKey] of fields) stats[fribbKey] = 0;
+
+  const groups = new Map();
+  for (const item of animeList) {
+    const row = findAnimeApiRow(item);
+    if (!row) continue;
+
+    if (ANIME_API_ANIME_IDS.some(key => item[key] != null && row[ANIME_API_FIELDS[key]] != null && item[key] !== row[ANIME_API_FIELDS[key]])) {
+      stats.conflicts++;
+      continue;
+    }
+
+    if (!groups.has(row)) groups.set(row, []);
+    groups.get(row).push(item);
+  }
+
+  const dropped = new Set();
+  for (const items of groups.values()) {
+    if (items.length < 2) continue;
+    const primary = items.find(item => item.anidb_id != null) || items[0];
+    for (const other of items) {
+      if (other === primary || contradicts(primary, other)) continue;
+      mergeEntryInto(primary, other);
+      dropped.add(other);
+      stats.merged++;
+    }
+  }
+
+  const merged = dropped.size > 0 ? animeList.filter(item => !dropped.has(item)) : animeList;
+
+  const owners = {};
+  for (const [fribbKey] of fields) {
+    const owner = new Map();
+    for (const item of merged) {
+      for (const value of fieldValues(item, fribbKey)) {
+        if (!owner.has(value)) owner.set(value, item);
+      }
+    }
+    owners[fribbKey] = owner;
+  }
+
+  for (const [row, items] of groups) {
+    for (const item of items) {
+      if (dropped.has(item)) continue;
+
+      let filled = false;
+      for (const [fribbKey, apiKey] of fields) {
+        if (row[apiKey] == null || fieldValues(item, fribbKey).length > 0) continue;
+
+        const owner = owners[fribbKey].get(row[apiKey]);
+        if (owner && owner !== item && contradicts(item, owner)) {
+          stats.rejected++;
+          continue;
+        }
+
+        item[fribbKey] = row[apiKey];
+        owners[fribbKey].set(row[apiKey], item);
+        stats[fribbKey]++;
+        filled = true;
+      }
+      if (filled) stats.rows++;
+    }
+  }
+
+  const deduped = dedupeSharedArtworkEntries(merged, stats);
+
+  stats.added = appendAnimeApiOnlyRows(deduped);
+  lastOverlayStats = stats;
+  return deduped;
+}
+
+function dedupeSharedArtworkEntries(animeList, stats) {
+  const dropped = new Set();
+
+  for (const fribbKey of ['tvdb_id', 'themoviedb_id']) {
+    const owners = new Map();
+    for (const item of animeList) {
+      if (dropped.has(item)) continue;
+      for (const value of fieldValues(item, fribbKey)) {
+        const owner = owners.get(value);
+        if (!owner) {
+          owners.set(value, item);
+          continue;
+        }
+        if (owner.type !== item.type || contradicts(owner, item)) continue;
+        mergeEntryInto(owner, item);
+        dropped.add(item);
+        stats.merged++;
+        break;
+      }
+    }
+  }
+
+  return dropped.size > 0 ? animeList.filter(item => !dropped.has(item)) : animeList;
+}
+
+function appendAnimeApiOnlyRows(animeList) {
+  if (!animeApiRows) return 0;
+
+  const present = { mal: new Set(), anilist: new Set(), kitsu: new Set(), anidb: new Set(), simkl: new Set(), tmdb: new Set(), tvdb: new Set(), imdb: new Set() };
+  for (const item of animeList) {
+    if (item.mal_id != null) present.mal.add(item.mal_id);
+    if (item.anilist_id != null) present.anilist.add(item.anilist_id);
+    if (item.kitsu_id != null) present.kitsu.add(item.kitsu_id);
+    if (item.anidb_id != null) present.anidb.add(item.anidb_id);
+    if (item.simkl_id != null) present.simkl.add(item.simkl_id);
+    if (item.tvdb_id != null) present.tvdb.add(item.tvdb_id);
+    for (const id of tmdbIdsOf(item)) present.tmdb.add(id);
+    for (const id of toIdList(item.imdb_id)) present.imdb.add(id);
+  }
+
+  let added = 0;
+  for (const row of animeApiRows) {
+    if (row.myanimelist === null && row.anilist === null && row.kitsu === null && row.anidb === null && row.simkl === null) continue;
+
+    if ((row.myanimelist !== null && present.mal.has(row.myanimelist))
+      || (row.anilist !== null && present.anilist.has(row.anilist))
+      || (row.kitsu !== null && present.kitsu.has(row.kitsu))
+      || (row.anidb !== null && present.anidb.has(row.anidb))
+      || (row.simkl !== null && present.simkl.has(row.simkl))
+      || (row.themoviedb !== null && present.tmdb.has(row.themoviedb))
+      || (row.thetvdb !== null && present.tvdb.has(row.thetvdb))
+      || (row.imdb !== null && present.imdb.has(row.imdb))) continue;
+
+    animeList.push({
+      type: row.type,
+      mal_id: row.myanimelist,
+      anilist_id: row.anilist,
+      kitsu_id: row.kitsu,
+      anidb_id: row.anidb,
+      simkl_id: row.simkl,
+      themoviedb_id: row.themoviedb,
+      tvdb_id: row.thetvdb,
+      imdb_id: row.imdb,
+    });
+    if (row.myanimelist !== null) present.mal.add(row.myanimelist);
+    if (row.anilist !== null) present.anilist.add(row.anilist);
+    if (row.kitsu !== null) present.kitsu.add(row.kitsu);
+    if (row.anidb !== null) present.anidb.add(row.anidb);
+    if (row.simkl !== null) present.simkl.add(row.simkl);
+    if (row.themoviedb !== null) present.tmdb.add(row.themoviedb);
+    if (row.thetvdb !== null) present.tvdb.add(row.thetvdb);
+    if (row.imdb !== null) present.imdb.add(row.imdb);
+    added++;
+  }
+  return added;
+}
+
 function processAndIndexData(data) {
   let animeList;
   
@@ -140,6 +443,9 @@ function processAndIndexData(data) {
     throw new Error(`Anime list expected to be an array, got ${typeof animeList}`);
   }
 
+  animeList = enrichWithAnimeApi(animeList);
+  const overlayStats = lastOverlayStats;
+
   animeIdMap.clear();
   tvdbIdMap.clear();
   tvdbIdToAnimeListMap.clear();
@@ -158,9 +464,16 @@ function processAndIndexData(data) {
   onaTypeCache.clear();
   
   for (const item of animeList) {
-    if (item.themoviedb_id && typeof item.themoviedb_id === 'object') {
-      item.themoviedb_id = item.themoviedb_id.tv ?? item.themoviedb_id.movie ?? null;
-    }
+    // Fribb collapses multi-part franchises into one entry, so imdb_id and
+    // themoviedb_id.movie can be arrays of distinct titles (e.g. Kizumonogatari
+    // Part 1/2/3). We index every id below so any part resolves; the scalar
+    // primary kept here is just a representative, NOT a canonical part — do not
+    // use it to fetch metadata for a specific part (use the incoming id instead).
+    const tmdbIds = tmdbIdsOf(item);
+    item.themoviedb_id = tmdbIds[0] ?? null;
+
+    const imdbIds = toIdList(item.imdb_id);
+    item.imdb_id = imdbIds[0] ?? null;
 
     if (item.mal_id) {
       animeIdMap.set(item.mal_id, item);
@@ -170,7 +483,9 @@ function processAndIndexData(data) {
     if (item.kitsu_id) kitsuIdMap.set(item.kitsu_id, item);
     if (item.anidb_id) anidbIdMap.set(item.anidb_id, item);
     if (item.anilist_id) anilistIdMap.set(item.anilist_id, item);
-    if (item.imdb_id) imdbIdMap.set(item.imdb_id, item);
+    for (const imdbId of imdbIds) {
+      if (!imdbIdMap.has(imdbId)) imdbIdMap.set(imdbId, item);
+    }
     if (item.simkl_id) simklIdMap.set(item.simkl_id, item);
 
     if (item.tvdb_id) {
@@ -181,15 +496,13 @@ function processAndIndexData(data) {
       }
       tvdbIdToAnimeListMap.get(tvdbId).push(item);
     }
-    if (item.themoviedb_id) {
-      const tmdbId = item.themoviedb_id;
+    for (const tmdbId of tmdbIds) {
       if (!tmdbIdToAnimeListMap.has(tmdbId)) {
         tmdbIdToAnimeListMap.set(tmdbId, []);
       }
       tmdbIdToAnimeListMap.get(tmdbId).push(item);
     }
-    if (item.imdb_id) {
-      const imdbId = item.imdb_id;
+    for (const imdbId of imdbIds) {
       if (!imdbIdToAnimeListMap.has(imdbId)) {
         imdbIdToAnimeListMap.set(imdbId, []);
       }
@@ -213,6 +526,9 @@ function processAndIndexData(data) {
 
   isInitialized = true;
   logger.info(`Successfully loaded and indexed ${animeIdMap.size} anime mappings.`);
+  if (overlayStats) {
+    logger.info(`[animeApi] Backfilled ${overlayStats.rows} entries: mal +${overlayStats.mal_id}, anilist +${overlayStats.anilist_id}, kitsu +${overlayStats.kitsu_id}, anidb +${overlayStats.anidb_id}, simkl +${overlayStats.simkl_id}, tmdb +${overlayStats.themoviedb_id}, tvdb +${overlayStats.tvdb_id}, imdb +${overlayStats.imdb_id}; merged ${overlayStats.merged} split entries, added ${overlayStats.added} new (${overlayStats.conflicts} conflicting matches and ${overlayStats.rejected} contested ids skipped).`);
+  }
 }
 
 /**
@@ -227,7 +543,7 @@ async function downloadAndProcessAnimeList(force = false, skipReloadOnUnchangedE
   try {
     if (useRedisCache && !force) {
       const savedEtag = await redis.get(REDIS_ETAG_KEY);
-      const headers = (await httpHead(REMOTE_MAPPING_URL)).headers;
+      const headers = (await httpHead(REMOTE_MAPPING_URL, BOOTSTRAP_RETRY)).headers;
       const remoteEtag = headers.etag;
 
       logger.debug(`[ID Mapper] [Fribb's Anime-List] Saved ETag: ${savedEtag} | Remote ETag: ${remoteEtag}`);
@@ -261,7 +577,7 @@ async function downloadAndProcessAnimeList(force = false, skipReloadOnUnchangedE
     }
 
     logger.debug("[ID Mapper] [Fribb's Anime-List] Downloading full list...");
-    const response = await httpGet(REMOTE_MAPPING_URL);
+    const response = await httpGet(REMOTE_MAPPING_URL, BOOTSTRAP_RETRY);
     let dataToCache;
     let dataForProcessing;
 
@@ -309,6 +625,81 @@ async function downloadAndProcessAnimeList(force = false, skipReloadOnUnchangedE
   }
 }
 
+async function reindexAnimeListWithOverlay() {
+  if (!isInitialized) return;
+  try {
+    processAndIndexData(await fs.readFile(LOCAL_CACHE_PATH, 'utf-8'));
+  } catch (error) {
+    logger.warn(`[ID Mapper] [animeApi] Could not re-index the anime list with the overlay: ${error.message}`);
+  }
+}
+
+async function downloadAndProcessAnimeApi(force = false, skipReloadOnUnchangedEtag = false, reindexAnimeList = true) {
+  const reindex = () => (reindexAnimeList ? reindexAnimeListWithOverlay() : Promise.resolve());
+
+  if (!ANIME_API_OVERLAY_ENABLED) {
+    logger.debug('[ID Mapper] [animeApi] Overlay disabled via ANIME_API_OVERLAY_ENABLED.');
+    return { success: true, message: 'Disabled', count: 0 };
+  }
+
+  const useRedisCache = redis;
+
+  try {
+    if (useRedisCache && !force) {
+      const savedEtag = await redis.get(REDIS_ANIME_API_ETAG_KEY);
+      const remoteEtag = (await httpHead(REMOTE_ANIME_API_URL, BOOTSTRAP_RETRY)).headers.etag;
+
+      logger.debug(`[ID Mapper] [animeApi] Saved ETag: ${savedEtag} | Remote ETag: ${remoteEtag}`);
+
+      if (savedEtag && remoteEtag && savedEtag === remoteEtag) {
+        if (skipReloadOnUnchangedEtag && animeApiIndex) {
+          logger.debug('[ID Mapper] [animeApi] No changes detected during scheduled refresh. Keeping existing in-memory data.');
+          await redis.set('maintenance:last_anime_api_update', Date.now().toString());
+          return { success: true, message: 'Unchanged (scheduled no-op)', count: animeApiRowCount };
+        }
+
+        try {
+          logger.debug('[ID Mapper] [animeApi] No changes detected. Loading from local disk cache...');
+          processAndIndexAnimeApi(await fs.readFile(LOCAL_ANIME_API_PATH, 'utf-8'));
+          await redis.set('maintenance:last_anime_api_update', Date.now().toString());
+          await reindex();
+          return { success: true, message: 'Loaded from cache (no changes)', count: animeApiRowCount };
+        } catch (e) {
+          logger.warn('[ID Mapper] [animeApi] ETag matched, but local cache was unreadable. Forcing re-download.');
+        }
+      }
+    }
+
+    logger.debug('[ID Mapper] [animeApi] Downloading mapping list...');
+    const response = await httpGet(REMOTE_ANIME_API_URL, BOOTSTRAP_RETRY);
+    const text = typeof response.data === 'string' ? response.data : String(response.data);
+    processAndIndexAnimeApi(text);
+
+    await fs.mkdir(path.dirname(LOCAL_ANIME_API_PATH), { recursive: true });
+    await fs.writeFile(LOCAL_ANIME_API_PATH, text, 'utf-8');
+    if (useRedisCache) {
+      if (response.headers.etag) await redis.set(REDIS_ANIME_API_ETAG_KEY, response.headers.etag);
+      await redis.set('maintenance:last_anime_api_update', Date.now().toString());
+    }
+
+    await reindex();
+    return { success: true, message: 'Downloaded and updated', count: animeApiRowCount };
+
+  } catch (error) {
+    logger.error(`[ID Mapper] [animeApi] An error occurred during remote download: ${error.message}`);
+
+    try {
+      processAndIndexAnimeApi(await fs.readFile(LOCAL_ANIME_API_PATH, 'utf-8'));
+      logger.debug('[ID Mapper] [animeApi] Successfully loaded data from local cache on fallback.');
+      await reindex();
+      return { success: true, message: 'Loaded from local cache (fallback)', count: animeApiRowCount };
+    } catch (fallbackError) {
+      logger.warn('[ID Mapper] [animeApi] Fallback to local cache also failed. Continuing without the overlay.');
+      return { success: false, message: `Failed to update: ${error.message}`, count: 0 };
+    }
+  }
+}
+
 /**
  * Downloads and processes the Trakt anime movies mapping file.
  * It uses Redis and ETags to check if the remote file has changed,
@@ -320,7 +711,7 @@ async function downloadAndProcessTraktAnimeMovies(skipReloadOnUnchangedEtag = fa
   try {
     if (useRedisCache) {
       const savedEtag = await redis.get(REDIS_TRAKT_ANIME_MOVIES_ETAG_KEY);
-      const headers = (await httpHead(REMOTE_TRAKT_ANIME_MOVIES_URL)).headers;
+      const headers = (await httpHead(REMOTE_TRAKT_ANIME_MOVIES_URL, BOOTSTRAP_RETRY)).headers;
       const remoteEtag = headers.etag;
 
       logger.debug(`[ID Mapper] [Trakt-Anime-Movies] Saved ETag: ${savedEtag} | Remote ETag: ${remoteEtag}`);
@@ -350,7 +741,7 @@ async function downloadAndProcessTraktAnimeMovies(skipReloadOnUnchangedEtag = fa
     }
 
     logger.debug('[ID Mapper] [Trakt-Anime-Movies] Downloading Trakt anime movies mapping...');
-    const response = await httpGet(REMOTE_TRAKT_ANIME_MOVIES_URL);
+    const response = await httpGet(REMOTE_TRAKT_ANIME_MOVIES_URL, BOOTSTRAP_RETRY);
     // GitHub raw returns text/plain, so response.data may be a string; parse if needed
     traktAnimeMovies = typeof response.data === 'string' ? JSON.parse(response.data) : response.data;
     const jsonData = JSON.stringify(traktAnimeMovies);
@@ -415,13 +806,55 @@ function processAndIndexTraktAnimeMovies(moviesArray) {
  * avoiding a full download if the local cache is up-to-date.
  * @param {boolean} force - If true, bypass ETag check and force re-download
  */
+function parseKitsuToImdbMapping(value, source) {
+  let parsed = value;
+  for (let attempt = 0; attempt < 2 && typeof parsed === 'string'; attempt++) {
+    parsed = JSON.parse(parsed);
+  }
+
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error(`${source} did not yield a mapping`);
+  }
+
+  const entries = Array.isArray(parsed) ? parsed : Object.values(parsed);
+  if (entries.length === 0 || !entries.slice(0, 5).every(entry => entry && typeof entry === 'object')) {
+    throw new Error(`${source} yielded ${entries.length} entries that are not mapping objects`);
+  }
+
+  let mapping;
+  if (entries.some(entry => entry.kitsu_id !== undefined)) {
+    mapping = {};
+    for (const entry of entries) {
+      const id = parseInt(entry.kitsu_id, 10);
+      if (Number.isFinite(id)) mapping[id] = entry;
+    }
+  } else if (Array.isArray(parsed)) {
+    throw new Error(`${source} yielded a list whose entries carry no kitsu_id`);
+  } else {
+    mapping = parsed;
+  }
+
+  const count = Object.keys(mapping).length;
+  if (count === 0) {
+    throw new Error(`${source} yielded no usable kitsu ids`);
+  }
+  if (!Object.values(mapping).slice(0, 5).some(entry => entry.imdb_id)) {
+    throw new Error(`${source} yielded entries carrying no imdb_id`);
+  }
+
+  if (typeof value === 'string' && typeof JSON.parse(value) === 'string') {
+    logger.warn(`[ID Mapper] [Kitsu-IMDB] Repaired a double-encoded mapping from ${source}.`);
+  }
+  return mapping;
+}
+
 async function downloadAndProcessKitsuToImdbMapping(force = false, skipReloadOnUnchangedEtag = false) {
-  const useRedisCache = redis; 
+  const useRedisCache = redis;
 
   try {
     if (useRedisCache && !force) {
       const savedEtag = await redis.get(REDIS_KITSU_TO_IMDB_ETAG_KEY);
-      const headers = (await httpHead(REMOTE_KITSU_TO_IMDB_MAPPING_URL)).headers;
+      const headers = (await httpHead(REMOTE_KITSU_TO_IMDB_MAPPING_URL, BOOTSTRAP_RETRY)).headers;
       const remoteEtag = headers.etag;
 
       logger.debug(`[ID Mapper] [Kitsu-IMDB] Saved ETag: ${savedEtag} | Remote ETag: ${remoteEtag}`);
@@ -438,7 +871,7 @@ async function downloadAndProcessKitsuToImdbMapping(force = false, skipReloadOnU
         try {
           logger.debug('[ID Mapper] [Kitsu-IMDB] No changes detected. Loading from local disk cache...');
           const fileContent = await fs.readFile(LOCAL_KITSU_TO_IMDB_MAPPING_PATH, 'utf-8');
-          kitsuToImdbMapping = JSON.parse(fileContent);
+          kitsuToImdbMapping = parseKitsuToImdbMapping(fileContent, 'local cache');
           kitsuToImdbMappingCount = Object.keys(kitsuToImdbMapping).length;
           isKitsuToImdbInitialized = true;
           // Update last check timestamp even when using cache
@@ -448,7 +881,7 @@ async function downloadAndProcessKitsuToImdbMapping(force = false, skipReloadOnU
           logger.debug(`[ID Mapper] [Kitsu-IMDB] Successfully loaded ${kitsuToImdbMappingCount} mappings from local cache.`);
           return { success: true, message: 'Loaded from cache (no changes)', count: kitsuToImdbMappingCount };
         } catch (e) {
-          logger.warn('[ID Mapper] [Kitsu-IMDB] ETag matched, but local cache was unreadable. Forcing re-download.');
+          logger.warn(`[ID Mapper] [Kitsu-IMDB] ETag matched, but local cache was unusable (${e.message}). Forcing re-download.`);
         }
       }
     } else if (force) {
@@ -458,8 +891,8 @@ async function downloadAndProcessKitsuToImdbMapping(force = false, skipReloadOnU
     }
 
     logger.debug('[ID Mapper] [Kitsu-IMDB] Downloading Kitsu to IMDB mapping...');
-    const response = await httpGet(REMOTE_KITSU_TO_IMDB_MAPPING_URL);
-    kitsuToImdbMapping = response.data;
+    const response = await httpGet(REMOTE_KITSU_TO_IMDB_MAPPING_URL, BOOTSTRAP_RETRY);
+    kitsuToImdbMapping = parseKitsuToImdbMapping(response.data, 'remote download');
     kitsuToImdbMappingCount = Object.keys(kitsuToImdbMapping).length;
     const jsonData = JSON.stringify(kitsuToImdbMapping);
 
@@ -482,7 +915,7 @@ async function downloadAndProcessKitsuToImdbMapping(force = false, skipReloadOnU
     
     try {
       const fileContent = await fs.readFile(LOCAL_KITSU_TO_IMDB_MAPPING_PATH, 'utf-8');
-      kitsuToImdbMapping = JSON.parse(fileContent);
+      kitsuToImdbMapping = parseKitsuToImdbMapping(fileContent, 'local cache (fallback)');
       kitsuToImdbMappingCount = Object.keys(kitsuToImdbMapping).length;
       isKitsuToImdbInitialized = true;
       logger.debug('[ID Mapper] [Kitsu-IMDB] Successfully loaded data from local cache on fallback.');
@@ -508,7 +941,8 @@ async function initializeMapper() {
   await Promise.all([
     downloadAndProcessAnimeList(),
     downloadAndProcessKitsuToImdbMapping(),
-    downloadAndProcessTraktAnimeMovies()
+    downloadAndProcessTraktAnimeMovies(),
+    downloadAndProcessAnimeApi()
   ]);
   
   // Schedule periodic updates
@@ -520,7 +954,8 @@ async function initializeMapper() {
         await Promise.all([
           downloadAndProcessAnimeList(false, true),
           downloadAndProcessKitsuToImdbMapping(false, true),
-          downloadAndProcessTraktAnimeMovies(true)
+          downloadAndProcessTraktAnimeMovies(true),
+          downloadAndProcessAnimeApi(false, true)
         ]);
         logger.debug('[ID Mapper] Scheduled update completed successfully.');
       } catch (error) {
@@ -988,6 +1423,37 @@ function getKitsuToImdbMappingsByImdbId(imdbId) {
  * @param {Object} imdbMetadata - The IMDB metadata containing episode information
  * @returns {Array} Enriched episodes array
  */
+function enrichMalEpisodesFromTvdbBridge(videos, kitsuId) {
+  const mapping = getMappingByKitsuId(kitsuId);
+  const imdbId = mapping?.imdb_id;
+  const anidbId = mapping?.anidb_id;
+  if (!imdbId || !anidbId) return null;
+
+  const { resolveTvdbEpisodeFromAnidbEpisode } = require('./anime-list-mapper');
+
+  let mapped = 0;
+  const enriched = videos.map(video => {
+    const episodeNumber = parseInt(video.episode, 10);
+    if (!Number.isFinite(episodeNumber)) return video;
+
+    const bridge = resolveTvdbEpisodeFromAnidbEpisode(anidbId, 1, episodeNumber);
+    if (!bridge || !Number.isFinite(bridge.tvdbSeason) || !Number.isFinite(bridge.tvdbEpisode)) return video;
+
+    mapped += 1;
+    return {
+      ...video,
+      id: `${imdbId}:${bridge.tvdbSeason}:${bridge.tvdbEpisode}`,
+      imdb_id: imdbId,
+      imdbSeason: bridge.tvdbSeason,
+      imdbEpisode: bridge.tvdbEpisode,
+    };
+  });
+
+  if (mapped === 0) return null;
+  logger.debug(`[enrichMalEpisodes] Bridged ${mapped}/${videos.length} episodes for kitsuId ${kitsuId} via AniDB ${anidbId} to IMDB ${imdbId}`);
+  return enriched;
+}
+
 async function enrichMalEpisodes(videos, kitsuId, preserveIds = false) {
   logger.debug(`[enrichMalEpisodes] Called with kitsuId: ${kitsuId}, videos count: ${videos?.length || 0}`);
   
@@ -997,8 +1463,10 @@ async function enrichMalEpisodes(videos, kitsuId, preserveIds = false) {
   }
 
   const imdbInfo = getKitsuToImdbMapping(kitsuId);
-  if (!imdbInfo) {
-    logger.debug(`[enrichMalEpisodes] No IMDB mapping found for kitsuId: ${kitsuId}, returning null (no enrichment)`);
+  if (!imdbInfo || !imdbInfo.imdb_id) {
+    const bridged = preserveIds ? null : enrichMalEpisodesFromTvdbBridge(videos, kitsuId);
+    if (bridged) return bridged;
+    logger.debug(`[enrichMalEpisodes] No usable IMDB mapping for kitsuId: ${kitsuId}, returning null (no enrichment)`);
     return null;
   }
 
@@ -2251,6 +2719,7 @@ function getTraktAnimeMovieByImdbId(imdbId) {
 async function forceUpdateIdMapper() {
   logger.info('[ID Mapper] Force update requested for ID Mapper...');
   try {
+    await downloadAndProcessAnimeApi(true, false, false);
     const result = await downloadAndProcessAnimeList(true);
     return result;
   } catch (error) {
@@ -2275,6 +2744,20 @@ async function forceUpdateKitsuImdbMapping() {
 }
 
 /**
+ * Force update the animeApi overlay
+ * @returns {Promise<Object>} Result object with success, message, and count
+ */
+async function forceUpdateAnimeApi() {
+  logger.info('[ID Mapper] Force update requested for animeApi overlay...');
+  try {
+    return await downloadAndProcessAnimeApi(true);
+  } catch (error) {
+    logger.error('[ID Mapper] Force update failed:', error.message);
+    return { success: false, message: `Force update failed: ${error.message}`, count: animeApiRowCount };
+  }
+}
+
+/**
  * Get stats for the ID Mapper (for dashboard display)
  * @returns {Object} Stats object with count, updateInterval, and initialized status
  */
@@ -2283,6 +2766,12 @@ function getIdMapperStats() {
     count: animeIdMap.size,
     updateIntervalHours: UPDATE_INTERVAL_HOURS,
     initialized: isInitialized,
+    animeApiOverlay: {
+      enabled: ANIME_API_OVERLAY_ENABLED,
+      loaded: !!animeApiIndex,
+      count: animeApiRowCount,
+      lastRun: lastOverlayStats
+    },
     cacheStats: {
       franchiseMap: {
         size: franchiseMapCache.size,
@@ -2311,11 +2800,22 @@ function getMemoryStats() {
     anilistIdMap: anilistIdMap.size,
     imdbIdMap: imdbIdMap.size,
     simklIdMap: simklIdMap.size,
+    animeApiIndex: animeApiIndex ? Object.values(animeApiIndex).reduce((total, index) => total + index.size, 0) : 0,
     onaTypeCache: onaTypeCache.size,
     kitsuToImdbCache: kitsuToImdbCache.size,
     franchiseMapCache: franchiseMapCache.size,
     tmdbFranchiseInfoCache: tmdbFranchiseInfoCache.size,
     tmdbSeasonCache: tmdbSeasonCache.size,
+  };
+}
+
+function getAnimeApiStats() {
+  return {
+    enabled: ANIME_API_OVERLAY_ENABLED,
+    count: animeApiRowCount,
+    initialized: !!animeApiIndex,
+    updateIntervalHours: UPDATE_INTERVAL_HOURS,
+    lastRun: lastOverlayStats
   };
 }
 
@@ -2375,8 +2875,10 @@ module.exports = {
   resolveOnaType,
   forceUpdateIdMapper,
   forceUpdateKitsuImdbMapping,
+  forceUpdateAnimeApi,
   getIdMapperStats,
   getKitsuImdbStats,
+  getAnimeApiStats,
   getMemoryStats,
   isInitialized: () => isInitialized
 };

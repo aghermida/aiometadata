@@ -106,6 +106,7 @@ class RequestTracker {
       "/api/config",
       "/api/test-keys",
       "/health",
+      "/poster-cache",
       "/favicon.ico",
       "/background.png",
       "/logo.png",
@@ -462,6 +463,79 @@ class RequestTracker {
     }
   }
 
+  async getTrendingContent(limit = 10, tz = null) {
+    try {
+      const dayKey = (i) => {
+        const d = new Date(Date.now() - i * 86400000);
+        if (tz) {
+          try { return d.toLocaleDateString("en-CA", { timeZone: tz }); } catch {}
+        }
+        return d.toISOString().split("T")[0];
+      };
+      const thisWeekDates = [...new Set(Array.from({ length: 7 }, (_, i) => dayKey(i)))];
+      const lastWeekDates = [...new Set(Array.from({ length: 7 }, (_, i) => dayKey(i + 7)))];
+
+      const aggregate = async (dates) => {
+        const results = await Promise.all(
+          dates.map(date => redis.zrevrange(`popular_content:${date}`, 0, 200, "WITHSCORES"))
+        );
+        const map = new Map();
+        for (const dayData of results) {
+          for (let i = 0; i < dayData.length; i += 2) {
+            const key = dayData[i];
+            const score = parseInt(dayData[i + 1]) || 0;
+            map.set(key, (map.get(key) || 0) + score);
+          }
+        }
+        return map;
+      };
+
+      const [thisWeek, lastWeek] = await Promise.all([
+        aggregate(thisWeekDates),
+        aggregate(lastWeekDates),
+      ]);
+
+      const hasPriorWeek = lastWeek.size > 0;
+
+      const entries = Array.from(thisWeek.entries())
+        .map(([contentKey, requests]) => ({ contentKey, requests, prev: lastWeek.get(contentKey) || 0 }))
+        .sort((a, b) => b.requests - a.requests)
+        .slice(0, limit);
+
+      return await Promise.all(
+        entries.map(async ({ contentKey, requests, prev }) => {
+          const parts = contentKey.split(":");
+          const keyType = parts[0];
+          const id = parts.slice(1).join(":");
+
+          let meta = null;
+          try {
+            const str = await redis.get(this.canonicalContentMetadataKey(keyType, id));
+            if (str) meta = JSON.parse(str);
+          } catch (_) {}
+
+          return {
+            id,
+            type: meta?.type || keyType,
+            title: meta?.title || this.formatContentTitle(id, keyType),
+            rating: meta?.rating || null,
+            year: meta?.year || null,
+            poster: meta?.poster || null,
+            landscapePoster: meta?.landscapePoster || null,
+            imdb_id: meta?.imdb_id || null,
+            requests,
+            prevRequests: prev,
+            deltaPct: hasPriorWeek && prev >= 5 ? Math.round(((requests - prev) / prev) * 100) : null,
+            isNew: hasPriorWeek && prev === 0,
+          };
+        }),
+      );
+    } catch (error) {
+      logger.error("[Request Tracker] Failed to get trending content:", error);
+      return [];
+    }
+  }
+
   async getSearchPatterns(limit = 50, days = 1, tz = null) {
     try {
       const dates = dateKeysForRange(days, tz);
@@ -520,25 +594,46 @@ class RequestTracker {
   // Capture metadata from complete meta components
   // NOTE: This function intentionally runs even when DISABLE_METRICS=true because it stores
   // content_metadata for the rating page functionality, not just telemetry/analytics metrics.
-  async captureMetadataFromComponents(metaId, meta, metaType) {
+  async captureMetadataFromComponents(metaId, meta, metaType, buildLanguage = null) {
     try {
       if (!meta || !meta.name) return;
 
       const type = meta.type || metaType || "unknown";
+      const canonicalKey = this.canonicalContentMetadataKey(type, metaId);
+
+      const preferredLang = (process.env.DASHBOARD_METADATA_LANGUAGE || "en").split("-")[0].toLowerCase();
+      const buildLang = (buildLanguage || "").split("-")[0].toLowerCase();
+      const buildIsPreferred = !preferredLang || (!!buildLang && buildLang === preferredLang);
+
+      let title = meta.name;
+      let titleLang = buildLang || null;
+
+      if (preferredLang && !buildIsPreferred) {
+        let existing = null;
+        try {
+          const existingStr = await redis.get(canonicalKey);
+          if (existingStr) existing = JSON.parse(existingStr);
+        } catch (_) {}
+        if (existing && existing.title_lang === preferredLang && existing.title) {
+          title = existing.title;
+          titleLang = preferredLang;
+        }
+      }
 
       // Store metadata for later lookup
       const metadataInfo = {
-        title: meta.name,
+        title,
+        title_lang: titleLang,
         type: meta.type || metaType,
         rating: meta.imdbRating || meta.rating || null,
         year: meta.year || null,
         description: meta.description || null,
         poster: meta.poster || null,
+        landscapePoster: meta.landscapePoster || meta.background || null,
         imdb_id: meta.imdb_id || null,
         cached_at: new Date().toISOString(),
       };
 
-      const canonicalKey = this.canonicalContentMetadataKey(type, metaId);
       const metadataPayload = JSON.stringify(metadataInfo);
 
       logger.debug(

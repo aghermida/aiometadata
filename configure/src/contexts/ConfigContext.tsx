@@ -3,11 +3,13 @@ import { AppConfig, CatalogConfig, SearchConfig } from "./config";
 import { compressToEncodedURIComponent, decompressFromEncodedURIComponent } from 'lz-string';
 import { allCatalogDefinitions, allSearchProviders } from "@/data/catalogs";
 import { LoadingScreen } from "@/components/LoadingScreen"; 
+import { hasAnyWatchTrackingEnabled } from '@/lib/watchTracking';
 
 interface AuthState {
   authenticated: boolean;
   userUUID: string | null;
   password: string | null; // ephemeral, in-memory only
+  installUrl?: string | null;
 }
 
 interface ConfigContextType {
@@ -20,12 +22,18 @@ interface ConfigContextType {
   hasBuiltInTvdb: boolean;
   hasBuiltInTmdb: boolean;
   traktSearchEnabled: boolean;
+  simklSearchEnabled: boolean;
   catalogTTL: number;
+  /** Instance ceiling on enabled catalogs, null when unset. */
+  maxCatalogs: number | null;
+  /** Fallback ceiling for a collection import when maxCatalogs is unset. */
+  collectionImportCatalogCap: number;
   isLoading: boolean;
   sessionId: string;
   setSessionId: (sessionId: string) => void;
   manifestFingerprint: React.MutableRefObject<string | null>;
-  snapshotManifestFingerprint: () => boolean;
+  manifestChangedSinceInstall: () => boolean;
+  markManifestInstalled: () => void;
 }
 
 const ConfigContext = createContext<ConfigContextType | undefined>(undefined);
@@ -57,14 +65,12 @@ function initializeConfigFromSources(): AppConfig | null {
     const pathParts = window.location.pathname.split('/');
     const configStringIndex = pathParts.findIndex(p => p.toLowerCase() === 'configure');
     
-    // Only load config from URL if it's NOT a Stremio UUID-based URL
-    // Stremio UUID URLs should require authentication
-    const isStremioUUIDUrl = pathParts.includes('stremio') && 
-                            configStringIndex > 1 && 
-                            pathParts[configStringIndex - 2] && 
-                            pathParts[configStringIndex - 2].match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
-    
-    if (configStringIndex > 0 && pathParts[configStringIndex - 1] && !isStremioUUIDUrl) {
+    const stremioIndex = pathParts.findIndex(p => p.toLowerCase() === 'stremio');
+    const isStremioUserUrl = stremioIndex !== -1 &&
+                            (configStringIndex === stremioIndex + 2 ||
+                             configStringIndex === stremioIndex + 3);
+
+    if (configStringIndex > 0 && pathParts[configStringIndex - 1] && !isStremioUserUrl) {
       const decompressed = decompressFromEncodedURIComponent(pathParts[configStringIndex - 1]);
       if (decompressed) {
         console.log('[Config] Initializing from URL.');
@@ -114,6 +120,7 @@ const initialConfig: AppConfig = {
   hideWatchedTrakt: false,
   hideWatchedAnilist: false,
   hideWatchedMdblist: false,
+  hideWatchedSimkl: false,
   providers: { movie: 'tmdb', series: 'tvdb', anime: 'mal', anime_id_provider: 'imdb', forceAnimeForDetectedImdb: false },
   artProviders: { 
     movie: { poster: 'meta', background: 'meta', logo: 'meta' },
@@ -144,12 +151,13 @@ const initialConfig: AppConfig = {
     openrouter: "",
     publicmetadb: "",
   },
-  posterRatingProvider: 'rpdb' as 'rpdb' | 'top',
+  posterRatingProvider: 'none' as 'none' | 'rpdb' | 'top' | 'custom',
   usePosterProxy: true,
-  mdblistWatchTracking: true,
-  anilistWatchTracking: true,
-  simklWatchTracking: true,
-  traktWatchTracking: true,
+  mdblistWatchTracking: false,
+  anilistWatchTracking: false,
+  malWatchTracking: false,
+  simklWatchTracking: false,
+  traktWatchTracking: false,
   publicmetadbWatchTracking: false,
   enableRatingPostersForLibrary: true, // Default to enabled - keep Rating Posters for library items
   showRateMeButton: false, // Default to disabled - user must enable to show rate button
@@ -173,7 +181,8 @@ const initialConfig: AppConfig = {
     enabled: true,
     ai_enabled: false,
     ai_provider: 'gemini',
-    ai_model: 'gemini-2.5-flash-lite',
+    ai_model: 'gemini-2.5-flash',
+    ai_trigger_keyword: '',
     providers: {
       movie: 'tmdb.search',
       series: 'tvdb.search',
@@ -189,6 +198,10 @@ const initialConfig: AppConfig = {
       'tvmaze.search': true,
       'trakt.search': true,
       'mdblist.search': true,
+      'imdb.suggestions.search': true,
+      'simkl.search': true,
+      'simkl.search.movie': true,
+      'simkl.search.series': true,
       'people_search_movie': false,
       'people_search_series': false,
       'mal.search.movie': true,
@@ -200,6 +213,7 @@ const initialConfig: AppConfig = {
   streaming: [], // Added to satisfy AppConfig interface
   customPosterUrlPattern: '',
   customBackgroundUrlPattern: '',
+  customLandscapeUrlPattern: '',
   customLogoUrlPattern: '',
 };
 
@@ -225,11 +239,15 @@ function getManifestFingerprint(config: AppConfig): string {
     showInHome: c.showInHome,
   }));
 
+  const subtitlesResource = hasAnyWatchTrackingEnabled(config);
+
   return JSON.stringify({
     catalogs: catalogFingerprint,
     addonName: config.addonName,
     catalogModeOnly: config.catalogModeOnly,
+    hideStremioCatalogs: config.hideStremioCatalogs,
     showRateMeButton: config.showRateMeButton,
+    subtitlesResource,
     showPrefix: config.showPrefix,
     language: config.language,
     search: {
@@ -367,7 +385,10 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
   const [hasBuiltInTvdb, setHasBuiltInTvdb] = useState(false);
   const [hasBuiltInTmdb, setHasBuiltInTmdb] = useState(false);
   const [traktSearchEnabled, setTraktSearchEnabled] = useState(true);
+  const [simklSearchEnabled, setSimklSearchEnabled] = useState(true);
   const [catalogTTL, setCatalogTTL] = useState(86400); // Default to 24 hours
+  const [maxCatalogs, setMaxCatalogs] = useState<number | null>(null);
+  const [collectionImportCatalogCap, setCollectionImportCatalogCap] = useState(300);
   const manifestFingerprint = useRef<string | null>(null);
 
   // --- THIS IS THE CORRECTED EFFECT ---
@@ -382,7 +403,10 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
         setHasBuiltInTvdb(!!envApiKeys.hasBuiltInTvdb);
         setHasBuiltInTmdb(!!envApiKeys.hasBuiltInTmdb);
         setTraktSearchEnabled(envApiKeys.traktSearchEnabled ?? true);
+        setSimklSearchEnabled(envApiKeys.simklSearchEnabled ?? true);
         setCatalogTTL(envApiKeys.catalogTTL || 86400);
+        setMaxCatalogs(envApiKeys.maxCatalogs ?? null);
+        setCollectionImportCatalogCap(envApiKeys.collectionImportCatalogCap || 300);
 
         // Layer in the server keys with the correct priority.
         // We use `preloadedConfig` because it holds the user's saved data.
@@ -442,17 +466,19 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
     setConfig(prev => ({ ...prev, sessionId: newSessionId }));
   };
 
-  // Compares current config against the stored baseline.
-  // Returns true if the manifest changed. Updates the baseline to current.
-  const snapshotManifestFingerprint = (): boolean => {
+  // Whether the manifest differs from the last installed baseline, without mutating it.
+  const manifestChangedSinceInstall = (): boolean => {
     const current = getManifestFingerprint(config);
-    const changed = manifestFingerprint.current !== null && current !== manifestFingerprint.current;
-    manifestFingerprint.current = current;
-    return changed;
+    return manifestFingerprint.current !== null && current !== manifestFingerprint.current;
+  };
+
+  // Reset the baseline to the current manifest (call when the user (re)installs).
+  const markManifestInstalled = (): void => {
+    manifestFingerprint.current = getManifestFingerprint(config);
   };
 
   return (
-    <ConfigContext.Provider value={{ config, setConfig, addonVersion, resetConfig, auth, setAuth, hasBuiltInTvdb, hasBuiltInTmdb, catalogTTL, isLoading, sessionId, setSessionId, traktSearchEnabled, manifestFingerprint, snapshotManifestFingerprint }}>
+    <ConfigContext.Provider value={{ config, setConfig, addonVersion, resetConfig, auth, setAuth, hasBuiltInTvdb, hasBuiltInTmdb, catalogTTL, maxCatalogs, collectionImportCatalogCap, isLoading, sessionId, setSessionId, traktSearchEnabled, simklSearchEnabled, manifestFingerprint, manifestChangedSinceInstall, markManifestInstalled }}>
       {children}
     </ConfigContext.Provider>
   );
@@ -468,4 +494,3 @@ export const useConfig = () => {
 export type { AppConfig };
 
 export type { CatalogConfig };
-

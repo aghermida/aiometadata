@@ -3,6 +3,7 @@ import { socksDispatcher } from 'fetch-socks';
 import { scrapeSingleImdbResultByTitle, getMetaFromImdbIo } from './imdb';
 import requestTracker from './requestTracker';
 import consola from 'consola';
+import { tmdbImageUrl, tmdbLogoSize, tmdbBackdropSize, tmdbPosterSize } from '../utils/tmdbImageSize';
 import nameToImdb from "name-to-imdb";
 import timingMetrics from './timing-metrics';
 import { cacheWrapGlobal, stableStringify } from './getCache';
@@ -35,8 +36,11 @@ const NON_RETRYABLE_CODES = new Set([400, 401, 403, 404, 422]);
 
 interface TmdbImage {
   iso_639_1: string | null;
+  iso_3166_1?: string | null;
   file_path: string;
   vote_average: number;
+  width?: number;
+  height?: number;
 }
 
 /**
@@ -113,7 +117,7 @@ if (!dispatcher) {
     }
   } else {
     dispatcher = new Agent({ allowH2: false, connect: { timeout: 10000 } });
-    console.log('[TMDB] undici agent is enabled for direct connections.');
+    consola.debug('[TMDB] undici agent is enabled for direct connections.');
   }
 }
 
@@ -126,6 +130,42 @@ interface TmdbRequestError extends Error {
     statusCode?: number;
     isRetryable?: boolean;
     retryDelay?: number;
+}
+
+function normalizeImdbMatchTitle(t: string): string {
+  return (t || '')
+    .toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^\w\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Trusts a title-search IMDb candidate only when its title matches one of the
+// TMDB titles (exact, or a full token subset/superset) within a one-year window,
+// rejecting loose fuzzy matches that merely share a release year.
+function isLikelyImdbTitleMatch(candidateName: string | undefined, candidateYear: number | string | undefined, acceptableTitles: (string | undefined)[], expectedYear: string | undefined): boolean {
+  const candidate = normalizeImdbMatchTitle(candidateName || '');
+  if (!candidate) return false;
+
+  if (expectedYear && candidateYear) {
+    const a = parseInt(String(expectedYear).substring(0, 4));
+    const b = parseInt(String(candidateYear).toString().substring(0, 4));
+    if (!isNaN(a) && !isNaN(b) && Math.abs(a - b) > 1) return false;
+  }
+
+  const candidateTokens = candidate.split(' ').filter(Boolean);
+  for (const raw of acceptableTitles) {
+    const t = normalizeImdbMatchTitle(raw || '');
+    if (!t) continue;
+    if (t === candidate) return true;
+    const tTokens = t.split(' ').filter(Boolean);
+    if (!tTokens.length) continue;
+    const tInCandidate = tTokens.every(tok => candidateTokens.includes(tok));
+    const candidateInT = candidateTokens.every(tok => tTokens.includes(tok));
+    if (tInCandidate || candidateInT) return true;
+  }
+  return false;
 }
 
 async function makeTmdbRequest(endpoint: string, apiKey: string, params: Record<string, any> = {}, method = 'GET', body: any = null, config: UserConfig = {} as UserConfig): Promise<any> {
@@ -222,7 +262,7 @@ async function makeTmdbRequest(endpoint: string, apiKey: string, params: Record<
               nameToImdbTitle = translation;
             }
           }
-          const imdbSearchResult = await new Promise((resolve) => {
+          const { imdbSearchResult, info } = await new Promise<{ imdbSearchResult: any; info: any }>((resolve) => {
             nameToImdb(
               {
                 name: nameToImdbTitle || "",
@@ -230,18 +270,32 @@ async function makeTmdbRequest(endpoint: string, apiKey: string, params: Record<
                 year: data.release_date.substring(0, 4),
                 strict: true
               },
-              (err: any, result: any) => resolve(err ? null : result)
+              (err: any, result: any, inf: any) => resolve(err ? { imdbSearchResult: null, info: null } : { imdbSearchResult: result, info: inf })
             );
           });
-          
+
+          let verified = false;
           if (imdbSearchResult) {
-              data.imdb_id = imdbSearchResult;
-              if (!data.external_ids) data.external_ids = {};
-              data.external_ids.imdb_id = imdbSearchResult;
+              const acceptableTitles = [data.original_title, data.title, nameToImdbTitle];
+              let candidateName = info?.meta?.name;
+              let candidateYear = info?.meta?.year;
+              if (!candidateName) {
+                  const candidateMeta = await getMetaFromImdbIo(imdbSearchResult, type);
+                  candidateName = candidateMeta?.name;
+                  candidateYear = candidateMeta?.year || candidateMeta?.releaseInfo;
+              }
+              verified = isLikelyImdbTitleMatch(candidateName, candidateYear, acceptableTitles, data.release_date);
+              if (verified) {
+                  data.imdb_id = imdbSearchResult;
+                  if (!data.external_ids) data.external_ids = {};
+                  data.external_ids.imdb_id = imdbSearchResult;
+              } else {
+                  consola.warn(`[TMDB] Rejected nameToImdb match for ${type} ${currentTmdbId} ("${nameToImdbTitle}"): ${imdbSearchResult} ("${candidateName}") failed title verification`);
+              }
           }
-          
+
           const duration = Date.now() - startTime;
-          timingMetrics.recordTiming('nameToImdb_lookup', duration, { type, success: !!imdbSearchResult });
+          timingMetrics.recordTiming('nameToImdb_lookup', duration, { type, success: verified });
       }
 
       // Strategy 2: Scraper Fallback
@@ -408,11 +462,21 @@ export async function primaryTranslations(config: UserConfig) {
 
 export async function movieInfo(params: any, config: UserConfig) {
   const { id, ...queryParams } = params;
-  return makeTmdbRequest(`/movie/${id}`, getApiKey(config), queryParams, 'GET', null, config);
+  const normalizedQueryParams = normalizeTmdbCacheQueryParams(queryParams);
+  const cacheKey = `tmdb:movie:detail:${id}${getTmdbQueryCacheSuffix(normalizedQueryParams)}`;
+  return cacheWrapGlobal(cacheKey, () =>
+    makeTmdbRequest(`/movie/${id}`, getApiKey(config), normalizedQueryParams, 'GET', null, config),
+    24 * 60 * 60
+  );
 }
 export async function tvInfo(params: any, config: UserConfig) {
   const { id, ...queryParams } = params;
-  return makeTmdbRequest(`/tv/${id}`, getApiKey(config), queryParams, 'GET', null, config);
+  const normalizedQueryParams = normalizeTmdbCacheQueryParams(queryParams);
+  const cacheKey = `tmdb:tv:detail:${id}${getTmdbQueryCacheSuffix(normalizedQueryParams)}`;
+  return cacheWrapGlobal(cacheKey, () =>
+    makeTmdbRequest(`/tv/${id}`, getApiKey(config), normalizedQueryParams, 'GET', null, config),
+    24 * 60 * 60
+  );
 }
 
 export async function movieReleaseDates(id: string, config: UserConfig) {
@@ -554,7 +618,7 @@ export async function genreMovieList(params: any, config: UserConfig) {
     makeTmdbRequest('/genre/movie/list', getApiKey(config), params, 'GET', null, config)
       .then(normalizeTmdbGenreListForCache),
     30 * 24 * 60 * 60,
-    { skipVersion: true }
+    { upstream: true }
   );
 }
 
@@ -564,7 +628,7 @@ export async function genreTvList(params: any, config: UserConfig) {
     makeTmdbRequest('/genre/tv/list', getApiKey(config), params, 'GET', null, config)
       .then(normalizeTmdbGenreListForCache),
     30 * 24 * 60 * 60,
-    { skipVersion: true }
+    { upstream: true }
   );
 }
 
@@ -847,7 +911,7 @@ export async function getTmdbMoviePoster(tmdbId: string, config: UserConfig) {
     if (images && images.posters && images.posters.length > 0) {
       const poster = selectTmdbImageByLang(images.posters, config);
       if (poster) {
-        return `https://image.tmdb.org/t/p/w600_and_h900_bestv2${poster.file_path}`;
+        return tmdbImageUrl(tmdbPosterSize(), poster.file_path);
       }
     }
     
@@ -868,7 +932,7 @@ export async function getTmdbSeriesPoster(tmdbId: string, config: UserConfig) {
     if (images && images.posters && images.posters.length > 0) {
       const poster = selectTmdbImageByLang(images.posters, config);
       if (poster) {
-        return `https://image.tmdb.org/t/p/w600_and_h900_bestv2${poster.file_path}`;
+        return tmdbImageUrl(tmdbPosterSize(), poster.file_path);
       }
     }
     
@@ -889,7 +953,7 @@ export async function getTmdbMovieBackground(tmdbId: string, config: UserConfig)
     if (images && images.backdrops && images.backdrops.length > 0) {
       const backdrop = selectTmdbImageByLang(images.backdrops, config);
       if (backdrop) {
-        return `https://image.tmdb.org/t/p/original${backdrop.file_path}`;
+        return tmdbImageUrl(tmdbBackdropSize(backdrop.width), backdrop.file_path);
       }
     }
     
@@ -910,7 +974,7 @@ export async function getTmdbSeriesBackground(tmdbId: string, config: UserConfig
     if (images && images.backdrops && images.backdrops.length > 0) {
       const backdrop = selectTmdbImageByLang(images.backdrops, config);
       if (backdrop) {
-        return `https://image.tmdb.org/t/p/original${backdrop.file_path}`;
+        return tmdbImageUrl(tmdbBackdropSize(backdrop.width), backdrop.file_path);
       }
     }
     
@@ -931,7 +995,7 @@ export async function getTmdbMovieLogo(tmdbId: string, config: UserConfig) {
     if (images && images.logos && images.logos.length > 0) {
       const logo = selectTmdbImageByLang(images.logos, config);
       if (logo) {
-        return `https://image.tmdb.org/t/p/original${logo.file_path}`;
+        return tmdbImageUrl(tmdbLogoSize(logo.width), logo.file_path);
       }
     }
 
@@ -952,7 +1016,7 @@ export async function getTmdbSeriesLogo(tmdbId: string, config: UserConfig) {
     if (images && images.logos && images.logos.length > 0) {
       const logo = selectTmdbImageByLang(images.logos, config);
       if (logo) {
-        return `https://image.tmdb.org/t/p/original${logo.file_path}`;
+        return tmdbImageUrl(tmdbLogoSize(logo.width), logo.file_path);
       }
     }
 

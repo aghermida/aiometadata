@@ -17,9 +17,24 @@ const SIMKL_BASE_URL = 'https://api.simkl.com';
 const SIMKL_CLIENT_ID = process.env.SIMKL_CLIENT_ID || '';
 const SIMKL_TRENDING_TTL = 12 * 60 * 60; // 12 hours
 const SIMKL_WATCHLIST_TTL = 24 * 60 * 60; // Cache in Redis for 24h, relies on activity check to invalidate
-const SIMKL_ACTIVITIES_TTL = parseInt(process.env.SIMKL_ACTIVITIES_TTL || '21600'); // Cache activity check for 6 hours (21600s) to prevent spamming on pagination
+const SIMKL_ACTIVITIES_TTL_DEFAULT = 6 * 60 * 60; // Cache activity check for 6h to prevent spamming on pagination
+
+function getSimklActivitiesTtl(): number {
+  const parsed = parseInt(process.env.SIMKL_ACTIVITIES_TTL || '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : SIMKL_ACTIVITIES_TTL_DEFAULT;
+}
 const SIMKL_TRENDING_DATA_URL = 'https://data.simkl.in/discover/trending';
 const SIMKL_DISCOVER_DATA_URL = 'https://data.simkl.in/discover';
+const SIMKL_APP_NAME = 'aiometadata';
+
+function simklDataParams(): string {
+  const params = new URLSearchParams({
+    'app-name': SIMKL_APP_NAME,
+    'app-version': process.env.npm_package_version || '1.0'
+  });
+  if (SIMKL_CLIENT_ID) params.set('client_id', SIMKL_CLIENT_ID);
+  return params.toString();
+}
 
 /**
  * Sanitize URL by removing access token for safe logging
@@ -196,6 +211,27 @@ async function makeAuthenticatedSimklRequest(
   }
 }
 
+/**
+ * `type` is its own path segment and its own bucket in the reply, and Simkl files
+ * anime apart from movies whatever the anime_type, so an anime film is only ever
+ * in the `anime` bucket — never in `movies`.
+ */
+async function getSimklRatings(
+  accessToken: string,
+  type: 'movies' | 'shows' | 'anime',
+  dateFrom?: string
+): Promise<any[]> {
+  try {
+    let url = `${SIMKL_BASE_URL}/sync/ratings/${type}`;
+    if (dateFrom) url += `?date_from=${encodeURIComponent(dateFrom)}`;
+    const response: any = await makeAuthenticatedSimklRequest(url, accessToken, `Simkl ${type} ratings`);
+    const bucket = response?.data?.[type];
+    return Array.isArray(bucket) ? bucket : [];
+  } catch (error) {
+    return [];
+  }
+}
+
 async function makeRateLimitedSimklRequest(url: string, context: string = 'Simkl Proxy'): Promise<any> {
   const headers = {
     'Content-Type': 'application/json',
@@ -205,6 +241,64 @@ async function makeRateLimitedSimklRequest(url: string, context: string = 'Simkl
   return await makeRateLimitedRequest(
     () => httpGet(url, { headers, dispatcher: simklDispatcher }),
     context
+  );
+}
+
+/**
+ * Simkl matches against every translated title it holds, which is why it answers
+ * queries like "LotR" that title-only engines miss.
+ */
+async function fetchSimklSearchItems(
+  type: 'movie' | 'tv' | 'anime',
+  query: string,
+  limit: number = 20,
+  page: number = 1
+): Promise<any[]> {
+  try {
+    // Simkl clamps rather than rejecting: limit tops out at 50 and page at 20.
+    const safeLimit = Math.min(Math.max(limit, 1), 50);
+    const safePage = Math.min(Math.max(page, 1), 20);
+    const url = `${SIMKL_BASE_URL}/search/${type}?q=${encodeURIComponent(query)}&limit=${safeLimit}&page=${safePage}&extended=full&${simklDataParams()}`;
+    const response: any = await makeRateLimitedSimklRequest(url, `Simkl search (${type}, query: "${query}")`);
+
+    if (!response?.data || !Array.isArray(response.data)) {
+      logger.info(`No Simkl search results found for query: "${query}"`);
+      return [];
+    }
+
+    logger.debug(`Found ${response.data.length} Simkl search results for query: "${query}"`);
+    return response.data;
+  } catch (err: any) {
+    if (err?.response?.status === 412) {
+      logger.error('Simkl rejected the client_id, so search cannot run. Check SIMKL_CLIENT_ID.');
+    } else {
+      logger.error(`Error fetching Simkl search results for ${type} "${query}":`, err.message);
+    }
+    return [];
+  }
+}
+
+/**
+ * Search answers with an index row, so anything beyond title, year, poster and ids
+ * has to come from here. This is also the only place a simkl id turns into an imdb
+ * or tvdb one, which search omits.
+ */
+async function fetchSimklItemDetail(type: 'movie' | 'tv', simklId: string | number): Promise<any> {
+  if (!simklId) return null;
+  const segment = type === 'movie' ? 'movies' : 'tv';
+  return cacheWrapGlobal(
+    `simkl:detail:${segment}:${simklId}`,
+    async () => {
+      try {
+        const url = `${SIMKL_BASE_URL}/${segment}/${simklId}?extended=full&${simklDataParams()}`;
+        const response: any = await makeRateLimitedSimklRequest(url, `Simkl detail (${segment}/${simklId})`);
+        return response?.data ?? null;
+      } catch (err: any) {
+        logger.debug(`Simkl detail lookup failed for ${segment}/${simklId}: ${err.message}`);
+        return null;
+      }
+    },
+    24 * 60 * 60
   );
 }
 
@@ -226,7 +320,7 @@ async function fetchSimklUserStats(tokenId: string): Promise<any> {
       return response.data;
     },
     statsTTL,
-    { skipVersion: true }
+    { upstream: true }
   );
 }
 
@@ -281,9 +375,26 @@ async function fetchSimklLastActivities(accessToken: string): Promise<any> {
       );
       return response.data;
     },
-    SIMKL_ACTIVITIES_TTL, 
-    { skipVersion: true }
+    getSimklActivitiesTtl(),
+    { upstream: true }
   );
+}
+
+async function getSimklActivityFingerprint(
+  accessToken: string,
+  type: 'movies' | 'shows' | 'anime',
+  status: string
+): Promise<string> {
+  try {
+    const activities = await fetchSimklLastActivities(accessToken);
+    if (!activities) return '';
+    const cat = type === 'shows' ? activities.tv_shows : activities[type];
+    const specific = cat?.[status] ?? cat?.all ?? activities.all ?? '';
+    const removed = cat?.removed_from_list ?? '';
+    return (specific || removed) ? `${specific}|${removed}` : '';
+  } catch {
+    return '';
+  }
 }
 
 async function fetchSimklWatchlistItems(
@@ -296,7 +407,7 @@ async function fetchSimklWatchlistItems(
     const tokenHash = crypto.createHash('sha256').update(accessToken).digest('hex').substring(0, 16);
     // Redis keys
     const fullListKey = `simkl-watchlist-full:${tokenHash}:${status}`; // Stores the full object { movies:[], shows:[], anime:[] }
-    const activitiesKey = `simkl-activities:${tokenHash}`; // Stores the last fetched activities object
+    const activitiesKey = `simkl-activities:${tokenHash}:${status}`; // Per-status watermark, matching fullListKey granularity
 
     // 1. Get latest activities from Simkl (Cached via fetchSimklLastActivities for 6 hours)
     let currentActivities;
@@ -731,6 +842,72 @@ async function fetchSimklWatchingItems(
   }
 }
 
+export interface SimklWatchedIds {
+  movieImdbIds: Set<string>;
+  showImdbIds: Set<string>;
+  malIds: Set<number>;
+  anilistIds: Set<number>;
+}
+
+async function getSimklWatchedIds(config: any): Promise<SimklWatchedIds | null> {
+  try {
+    const token = await getSimklToken(config?.apiKeys?.simklTokenId);
+    const accessToken = token?.access_token;
+    if (!accessToken) return null;
+
+    const types = ['movies', 'shows', 'anime'] as const;
+    const tokenHash = crypto.createHash('sha256').update(accessToken).digest('hex').substring(0, 16);
+    const fingerprints = await Promise.all(
+      types.map(type => getSimklActivityFingerprint(accessToken, type, 'completed'))
+    );
+    const fingerprint = crypto.createHash('sha256')
+      .update(fingerprints.join('|'))
+      .digest('hex')
+      .substring(0, 16);
+
+    const watched = await cacheWrapGlobal(`simkl_watched_ids:${tokenHash}:${fingerprint}`, async () => {
+      const movieImdbIds: string[] = [];
+      const showImdbIds: string[] = [];
+      const malIds: number[] = [];
+      const anilistIds: number[] = [];
+
+      for (const type of types) {
+        const { items } = await fetchSimklWatchlistItems(accessToken, type, 'completed');
+        for (const item of items) {
+          const ids = (item?.movie || item?.show)?.ids;
+          if (!ids) continue;
+
+          const imdb = ids.imdb ? String(ids.imdb).trim() : '';
+          if (imdb) {
+            const isMovie = type === 'movies'
+              || (type === 'anime' && (item.anime_type === 'movie' || item.anime_type === 'ona'));
+            (isMovie ? movieImdbIds : showImdbIds).push(imdb.startsWith('tt') ? imdb : `tt${imdb}`);
+          }
+
+          if (type !== 'anime') continue;
+          const malId = resolveMalIdFromIds(ids);
+          if (malId) malIds.push(malId);
+          const anilistId = ids.anilist || (malId ? idMapper.getMappingByMalId(malId)?.anilist_id : null);
+          if (anilistId) anilistIds.push(Number(anilistId));
+        }
+      }
+
+      logger.info(`[Watched IDs] ${movieImdbIds.length} movies, ${showImdbIds.length} shows, ${malIds.length} anime completed on Simkl`);
+      return { movieImdbIds, showImdbIds, malIds, anilistIds };
+    }, SIMKL_WATCHLIST_TTL);
+
+    return {
+      movieImdbIds: new Set(watched.movieImdbIds),
+      showImdbIds: new Set(watched.showImdbIds),
+      malIds: new Set(watched.malIds),
+      anilistIds: new Set(watched.anilistIds),
+    };
+  } catch (err: any) {
+    logger.warn(`[Watched IDs] Error fetching Simkl watched IDs: ${err.message}`);
+    return null;
+  }
+}
+
 /** Resolves mal_id only from native anime IDs (mal, anilist, kitsu, anidb). Does NOT resolve from imdb/tmdb/tvdb - those go through getMeta. */
 function resolveMalIdFromIds(ids: any): number | null {
   const malId = ids.mal;
@@ -963,7 +1140,7 @@ async function fetchSimklTrendingItems(
   try {
     // Map type to the JSON file path segments
     const endpoint = type === 'movies' ? 'movies' : type === 'shows' ? 'tv' : 'anime';
-    const url = `${SIMKL_TRENDING_DATA_URL}/${endpoint}/${interval}_500.json`;
+    const url = `${SIMKL_TRENDING_DATA_URL}/${endpoint}/${interval}_500.json?${simklDataParams()}`;
 
     logger.debug(`Simkl trending ${type}: interval=${interval}, page=${page}, limit=${limit}, url=${url}`);
 
@@ -985,7 +1162,7 @@ async function fetchSimklTrendingItems(
         );
       },
       ttl,
-      { skipVersion: true }
+      { upstream: true }
     );
 
     const allItems: any[] = Array.isArray(response.data) ? response.data : [];
@@ -1017,6 +1194,117 @@ async function fetchSimklTrendingItems(
     logger.error(`Error fetching Simkl trending ${type}, interval ${interval}, page ${page}:`, err.message);
     return { items: [], hasMore: false };
   }
+}
+
+function simklEntryRating(entry: any): { rating: number; votes: number } {
+  const s = entry?.ratings?.simkl;
+  return { rating: Number(s?.rating) || 0, votes: Number(s?.votes) || 0 };
+}
+
+function parseRuntimeMinutes(runtime: any): number {
+  if (!runtime) return 0;
+  const str = String(runtime);
+  const h = /(\d+)\s*h/.exec(str);
+  const m = /(\d+)\s*m/.exec(str);
+  return (h ? parseInt(h[1], 10) * 60 : 0) + (m ? parseInt(m[1], 10) : 0);
+}
+
+function parseDropRate(dropRate: any): number {
+  if (!dropRate) return 0;
+  const v = parseFloat(String(dropRate).replace('%', ''));
+  return isNaN(v) ? 0 : v;
+}
+
+function parseBoxOffice(metadata: any): number {
+  if (!metadata) return 0;
+  const m = /Box office\s*\$?([\d.]+)\s*([KMB])?/i.exec(String(metadata));
+  if (!m) return 0;
+  const n = parseFloat(m[1]);
+  if (isNaN(n)) return 0;
+  const suffix = m[2]?.toUpperCase();
+  const mult = suffix === 'B' ? 1e9 : suffix === 'M' ? 1e6 : suffix === 'K' ? 1e3 : 1;
+  return n * mult;
+}
+
+type SimklRecipeFn = (items: any[]) => any[];
+
+const SIMKL_RECIPES: Record<string, SimklRecipeFn> = {
+  hiddengems: (items) => {
+    const watchedVals = items
+      .map((it: any) => Number(it.watched) || 0)
+      .filter((v: number) => v > 0)
+      .sort((a: number, b: number) => a - b);
+    const median = watchedVals.length ? watchedVals[Math.floor(watchedVals.length / 2)] : 0;
+    return items
+      .filter((it: any) => {
+        const { rating, votes } = simklEntryRating(it);
+        const watched = Number(it.watched) || 0;
+        return rating >= 7.5 && votes >= 100 && (median === 0 || watched <= median);
+      })
+      .sort((a: any, b: any) => {
+        const ra = simklEntryRating(a);
+        const rb = simklEntryRating(b);
+        return rb.rating - ra.rating || rb.votes - ra.votes;
+      });
+  },
+  marathon: (items) => {
+    return items
+      .filter((it: any) => {
+        const eps = Number(it.total_episodes) || 0;
+        return it.status === 'ended' && eps >= 24 && parseDropRate(it.drop_rate) <= 5;
+      })
+      .sort((a: any, b: any) => {
+        const ra = simklEntryRating(a);
+        const rb = simklEntryRating(b);
+        return rb.rating - ra.rating || (Number(b.watched) || 0) - (Number(a.watched) || 0);
+      });
+  },
+  quick: (items) => {
+    return items
+      .filter((it: any) => {
+        const mins = parseRuntimeMinutes(it.runtime);
+        const { votes } = simklEntryRating(it);
+        return mins > 0 && mins <= 100 && votes >= 30;
+      })
+      .sort((a: any, b: any) => {
+        const ra = simklEntryRating(a);
+        const rb = simklEntryRating(b);
+        return rb.rating - ra.rating || (Number(b.watched) || 0) - (Number(a.watched) || 0);
+      });
+  },
+  boxoffice: (items) => {
+    return items
+      .map((it: any) => ({ it, bo: parseBoxOffice(it.metadata) }))
+      .filter((x: any) => x.bo > 0)
+      .sort((a: any, b: any) => b.bo - a.bo)
+      .map((x: any) => x.it);
+  }
+};
+
+async function fetchSimklRecipeItems(
+  recipe: string,
+  type: 'movies' | 'shows' | 'anime',
+  interval: 'today' | 'week' | 'month' = 'week',
+  page: number = 1,
+  limit: number = 20,
+  cacheTTL?: number
+): Promise<{ items: any[]; totalItems?: number; hasMore: boolean; totalPages?: number }> {
+  const recipeFn = SIMKL_RECIPES[recipe];
+  if (!recipeFn) {
+    logger.warn(`[Simkl] Unknown recipe: ${recipe}`);
+    return { items: [], hasMore: false };
+  }
+
+  const full = await fetchSimklTrendingItems(type, interval, 1, 100000, cacheTTL);
+  const transformed = recipeFn(full.items || []);
+
+  const startIndex = (page - 1) * limit;
+  const pageItems = transformed.slice(startIndex, startIndex + limit);
+  const hasMore = startIndex + limit < transformed.length;
+  const totalItems = transformed.length;
+
+  logger.debug(`[Simkl] Recipe ${recipe} (${type}/${interval}): ${totalItems} matches, page ${page} -> ${pageItems.length} items`);
+  return { items: pageItems, hasMore, totalItems, totalPages: Math.ceil(totalItems / limit) };
 }
 
 interface SimklDiscoverQuery {
@@ -1078,7 +1366,7 @@ async function fetchSimklGenreItems(
         );
       },
       ttl,
-      { skipVersion: true }
+      { upstream: true }
     );
 
     const allItems: any[] = Array.isArray(response?.data) ? response.data : [];
@@ -1115,7 +1403,7 @@ async function fetchSimklDvdReleases(
   cacheTTL?: number
 ): Promise<{items: any[], totalItems?: number, hasMore: boolean, totalPages?: number}> {
   try {
-    const url = `${SIMKL_DISCOVER_DATA_URL}/dvd/releases_500.json`;
+    const url = `${SIMKL_DISCOVER_DATA_URL}/dvd/releases_500.json?${simklDataParams()}`;
 
     logger.debug(`Simkl dvd releases: page=${page}, limit=${limit}, url=${url}`);
 
@@ -1137,7 +1425,7 @@ async function fetchSimklDvdReleases(
         );
       },
       ttl,
-      { skipVersion: true }
+      { upstream: true }
     );
 
     const allItems: any[] = Array.isArray(response.data) ? response.data : [];
@@ -1167,11 +1455,17 @@ async function fetchSimklDvdReleases(
 
 export {
   fetchSimklUserStats,
+  fetchSimklSearchItems,
+  fetchSimklItemDetail,
   fetchSimklWatchlistItems,
   parseSimklItems,
   makeAuthenticatedSimklRequest,
+  getSimklRatings,
   getSimklToken,
+  getSimklWatchedIds,
+  getSimklActivityFingerprint,
   fetchSimklTrendingItems,
+  fetchSimklRecipeItems,
   fetchSimklDvdReleases,
   fetchSimklGenreItems,
   fetchSimklCalendarItems,
@@ -1189,7 +1483,7 @@ async function fetchSimklCalendar(
     return await cacheWrapGlobal(
       cacheKey,
       async () => {
-        const url = `https://data.simkl.in/calendar/${type}.json`;
+        const url = `https://data.simkl.in/calendar/${type}.json?${simklDataParams()}`;
         // Use a simple GET request for the CDN file
         const response: any = await makeRateLimitedRequest(
           () => httpGet(url, { dispatcher: simklDispatcher }),
@@ -1198,7 +1492,7 @@ async function fetchSimklCalendar(
         return Array.isArray(response.data) ? response.data : [];
       },
       cacheTTL,
-      { skipVersion: true }
+      { upstream: true }
     );
   } catch (err: any) {
     logger.error(`Error fetching Simkl calendar ${type}:`, err.message);

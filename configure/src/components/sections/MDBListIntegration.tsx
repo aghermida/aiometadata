@@ -8,7 +8,14 @@ import { Switch } from '@/components/ui/switch';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter, DialogClose } from "@/components/ui/dialog";
-import { ChevronDown, Loader2, Plus, Trash2, KeyRound, BarChart3, Settings, PlayCircle, UserSearch, Link2, Bookmark, Sparkles, TrendingUp, Download } from 'lucide-react';
+import { ChevronDown, Loader2, Plus, Trash2, KeyRound, BarChart3, Settings, PlayCircle, UserSearch, Link2, Bookmark, Sparkles, TrendingUp, Download, Eye, EyeOff, CheckCircle2, ThumbsUp } from 'lucide-react';
+
+const MDBLIST_RECOMMENDED_SECTIONS = [
+  { section: 'recommended', label: 'Recommended For You', description: 'Personalised picks based on your ratings and taste' },
+  { section: 'trending', label: 'Trending In Your Genres', description: "What's gaining traction in the genres you love" },
+  { section: 'similar', label: 'Popular Among Similar Users', description: 'Highly rated by people with similar taste to yours' },
+  { section: 'rising', label: 'Rising', description: 'Global rising items' },
+] as const;
 import { toast } from "sonner";
 import { apiCache } from '@/utils/apiCache';
 import { getGenresBySelection, GenreSelection } from '@/data/genres';
@@ -23,6 +30,7 @@ interface MDBListIntegrationProps {
 export function MDBListIntegration({ isOpen, onClose }: MDBListIntegrationProps) {
   const { config, setConfig, catalogTTL } = useConfig();
   const [tempKey, setTempKey] = useState(config.apiKeys.mdblist || "");
+  const [showKey, setShowKey] = useState(false);
   const [isValid, setIsValid] = useState(!!config.apiKeys.mdblist);
   const [isChecking, setIsChecking] = useState(false);
   const [customListUrl, setCustomListUrl] = useState("");
@@ -789,6 +797,37 @@ export function MDBListIntegration({ isOpen, onClose }: MDBListIntegrationProps)
     }
   };
 
+  const isRecommendedCatalogAdded = (section: string) =>
+    config.catalogs.some(c => c.id === `mdblist.recommended.${section}`);
+
+  const toggleRecommendedCatalog = (section: string, label: string) => {
+    const catalogId = `mdblist.recommended.${section}`;
+    if (isRecommendedCatalogAdded(section)) {
+      setConfig(prev => ({
+        ...prev,
+        catalogs: prev.catalogs.filter(c => c.id !== catalogId),
+      }));
+      toast.success(`Removed "${label}" catalog`);
+    } else {
+      const newCatalog: CatalogConfig = {
+        id: catalogId,
+        type: 'all',
+        name: label,
+        enabled: true,
+        showInHome: true,
+        source: 'mdblist',
+        cacheTTL: defaultCacheTTL,
+        enableRatingPosters: true,
+        metadata: {}
+      };
+      setConfig(prev => ({
+        ...prev,
+        catalogs: [...prev.catalogs, newCatalog],
+      }));
+      toast.success(`Added "${label}" catalog`);
+    }
+  };
+
   const handleImportWatchlist = async () => {
     if (!tempKey) {
       toast.error("Please enter your MDBList API key first.");
@@ -974,7 +1013,18 @@ export function MDBListIntegration({ isOpen, onClose }: MDBListIntegrationProps)
             <CardContent className="space-y-4">
               <div className="space-y-2">
                 <Label htmlFor="mdblistkey">API Key</Label>
-                <Input id="mdblistkey" value={tempKey} onChange={(e) => setTempKey(e.target.value)} placeholder="Enter your MDBList API key" />
+                <div className="flex items-center space-x-2">
+                  <Input id="mdblistkey" type={showKey ? 'text' : 'password'} value={tempKey} onChange={(e) => setTempKey(e.target.value)} placeholder="Enter your MDBList API key" />
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => setShowKey(!showKey)}
+                    aria-label={showKey ? 'Hide key' : 'Show key'}
+                    className="text-muted-foreground hover:text-foreground shrink-0"
+                  >
+                    {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </Button>
+                </div>
                 <a href="https://mdblist.com/preferences/#api_key_uid" target="_blank" rel="noopener noreferrer" className="text-xs text-muted-foreground hover:underline">
                   Where do I get this?
                 </a>
@@ -1510,6 +1560,59 @@ export function MDBListIntegration({ isOpen, onClose }: MDBListIntegrationProps)
                   <div className="text-sm text-muted-foreground">
                     This will create a catalog showing items from your personal MDBList watchlist.
                   </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Recommendations Section */}
+          {isValid && (
+            <Card className="bg-gradient-to-br from-sky-500/10 via-card/80 to-card/80 border-sky-400/20">
+              <CardHeader className="flex-row items-start gap-3 sm:gap-4 space-y-0 p-4 sm:p-6">
+                <div className="shrink-0 h-10 w-10 rounded-lg bg-sky-500/15 text-sky-300 flex items-center justify-center ring-1 ring-sky-400/20">
+                  <ThumbsUp className="h-5 w-5" />
+                </div>
+                <div className="flex-1 min-w-0 space-y-1.5">
+                  <CardTitle>Recommendations</CardTitle>
+                  <CardDescription>
+                    Add MDBList recommendation feeds as catalogs. Personalised sections require MDBList supporter access with recommendations enabled at mdblist.com/preferences; "Rising" works for everyone.
+                  </CardDescription>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-2">
+                  {MDBLIST_RECOMMENDED_SECTIONS.map(({ section, label, description }) => {
+                    const added = isRecommendedCatalogAdded(section);
+                    return (
+                      <div key={section} className="flex items-center justify-between gap-3 p-3 border rounded-lg bg-muted/30">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium truncate">{label}</span>
+                            {added && <CheckCircle2 className="h-4 w-4 text-green-500 shrink-0" />}
+                          </div>
+                          <p className="text-xs text-muted-foreground truncate">{description}</p>
+                        </div>
+                        <Button
+                          variant={added ? "destructive" : "outline"}
+                          size="sm"
+                          onClick={() => toggleRecommendedCatalog(section, label)}
+                          className="shrink-0"
+                        >
+                          {added ? (
+                            <>
+                              <Trash2 className="h-4 w-4 mr-1" />
+                              Remove
+                            </>
+                          ) : (
+                            <>
+                              <Plus className="h-4 w-4 mr-1" />
+                              Add Catalog
+                            </>
+                          )}
+                        </Button>
+                      </div>
+                    );
+                  })}
                 </div>
               </CardContent>
             </Card>

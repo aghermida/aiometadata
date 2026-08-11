@@ -11,15 +11,32 @@ const logger = consola.withTag('Database');
 
 type DbType = 'sqlite' | 'postgres';
 
+function dbTypeFromUri(uri: string | undefined): DbType | null {
+  if (!uri) return null;
+  if (uri.startsWith('sqlite://')) return 'sqlite';
+  if (uri.startsWith('postgres://') || uri.startsWith('postgresql://')) return 'postgres';
+  return null;
+}
+
 class Database {
   db: any;
-  type: DbType | null;
+  readDb: any;
+  private connectedType: DbType | null;
   initialized: boolean;
 
   constructor() {
     this.db = null;
-    this.type = null;
+    this.readDb = null;
+    this.connectedType = null;
     this.initialized = false;
+  }
+
+  get type(): DbType | null {
+    return this.connectedType ?? dbTypeFromUri(process.env.DATABASE_URI);
+  }
+
+  set type(value: DbType | null) {
+    this.connectedType = value;
   }
 
   executeSQLiteStatement(statement: any, method: string, params: any = []) {
@@ -65,9 +82,10 @@ class Database {
       throw new Error('DATABASE_URI environment variable is required');
     }
 
-    if (databaseUri.startsWith('sqlite://')) {
+    const uriType = dbTypeFromUri(databaseUri);
+    if (uriType === 'sqlite') {
       await this.initializeSQLite(databaseUri);
-    } else if (databaseUri.startsWith('postgres://') || databaseUri.startsWith('postgresql://')) {
+    } else if (uriType === 'postgres') {
       await this.initializePostgreSQL(databaseUri);
     } else {
       throw new Error('Unsupported database URI format. Use sqlite:// or postgres://');
@@ -76,8 +94,16 @@ class Database {
     // Mark initialized BEFORE creating tables to avoid recursive initialize() calls
     // from runQuery/getQuery during table creation.
     this.initialized = true;
-    await this.createTables();
-    logger.info(`Initialized ${this.type} database`);
+
+    const runMigrations = String(process.env.RUN_MIGRATIONS ?? 'true').toLowerCase() !== 'false';
+    if (runMigrations) {
+      await this.createTables();
+    } else {
+      logger.info('RUN_MIGRATIONS=false, skipping schema creation (expecting an already-migrated database)');
+    }
+
+    const usingReplica = this.readDb && this.readDb !== this.db;
+    logger.info(`Initialized ${this.type} database${usingReplica ? ' with a separate read replica' : ''}`);
   }
 
   async initializeSQLite(uri: string): Promise<void> {
@@ -101,6 +127,8 @@ class Database {
     this.db.pragma('cache_size = 10000');
     this.db.pragma('temp_store = MEMORY');
     this.db.pragma('mmap_size = 268435456');
+
+    this.readDb = this.db;
   }
 
   async initializePostgreSQL(uri: string): Promise<void> {
@@ -108,6 +136,23 @@ class Database {
     this.type = 'postgres';
 
     await this.db.query('SELECT 1');
+
+    const readUri = process.env.DATABASE_READ_URI;
+    if (readUri && readUri !== uri) {
+      try {
+        this.readDb = new Pool({ connectionString: readUri });
+        await this.readDb.query('SELECT 1');
+        logger.info('Connected to read replica (DATABASE_READ_URI)');
+      } catch (error: any) {
+        logger.warn(`Read replica unreachable, falling back to primary for reads: ${error.message}`);
+        if (this.readDb && this.readDb !== this.db) {
+          try { await this.readDb.end(); } catch { /* ignore */ }
+        }
+        this.readDb = this.db;
+      }
+    } else {
+      this.readDb = this.db;
+    }
   }
 
   async createTables(): Promise<void> {
@@ -115,6 +160,34 @@ class Database {
       await this.createSQLiteTables();
     } else {
       await this.createPostgreSQLTables();
+    }
+    await this.ensureAccountColumns();
+  }
+
+  /**
+   * The accounts table predates the columns that record what an identity
+   * presented and whether it is barred, and CREATE TABLE IF NOT EXISTS leaves
+   * an existing one untouched.
+   */
+  async ensureAccountColumns(): Promise<void> {
+    const columns: Array<[string, string]> = [
+      ['groups_json', 'TEXT'],
+      ['blocked', 'INTEGER NOT NULL DEFAULT 0'],
+    ];
+
+    for (const [name, definition] of columns) {
+      try {
+        if (this.type === 'sqlite') {
+          const existing = await this.allQuery(`PRAGMA table_info(accounts)`);
+          if (existing.some((column: any) => column.name === name)) continue;
+          await this.runQuery(`ALTER TABLE accounts ADD COLUMN ${name} ${definition}`);
+        } else {
+          await this.runQuery(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS ${name} ${definition}`);
+        }
+        logger.info(`Migrated accounts schema: added ${name}`);
+      } catch (error: any) {
+        logger.warn(`Could not add accounts.${name}: ${error.message}`);
+      }
     }
   }
 
@@ -148,6 +221,12 @@ class Database {
         user_uuid TEXT UNIQUE NOT NULL,
         trusted_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )`,
+      `CREATE TABLE IF NOT EXISTS user_aliases (
+        alias_lower TEXT PRIMARY KEY,
+        alias TEXT NOT NULL,
+        user_uuid TEXT UNIQUE NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`,
       `CREATE TABLE IF NOT EXISTS oauth_tokens (
         id TEXT PRIMARY KEY,
         provider TEXT NOT NULL,
@@ -165,7 +244,29 @@ class Database {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )`
+      )`,
+      `CREATE TABLE IF NOT EXISTS accounts (
+        id TEXT PRIMARY KEY,
+        issuer TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        username TEXT NOT NULL,
+        email TEXT,
+        groups_json TEXT,
+        blocked INTEGER NOT NULL DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_identity ON accounts(issuer, subject)`,
+      `CREATE TABLE IF NOT EXISTS account_configs (
+        account_id TEXT NOT NULL,
+        user_uuid TEXT NOT NULL,
+        label TEXT NOT NULL,
+        linked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        last_opened_at DATETIME,
+        PRIMARY KEY (account_id, user_uuid),
+        FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_account_configs_uuid ON account_configs(user_uuid)`
     ];
 
     for (const query of queries) {
@@ -203,6 +304,12 @@ class Database {
         user_uuid VARCHAR(255) UNIQUE NOT NULL,
         trusted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )`,
+      `CREATE TABLE IF NOT EXISTS user_aliases (
+        alias_lower VARCHAR(64) PRIMARY KEY,
+        alias VARCHAR(64) NOT NULL,
+        user_uuid VARCHAR(255) UNIQUE NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )`,
       `CREATE TABLE IF NOT EXISTS oauth_tokens (
         id VARCHAR(255) PRIMARY KEY,
         provider VARCHAR(50) NOT NULL,
@@ -220,7 +327,28 @@ class Database {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )`
+      )`,
+      `CREATE TABLE IF NOT EXISTS accounts (
+        id VARCHAR(64) PRIMARY KEY,
+        issuer TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        username VARCHAR(255) NOT NULL,
+        email VARCHAR(320),
+        groups_json TEXT,
+        blocked INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_identity ON accounts(issuer, subject)`,
+      `CREATE TABLE IF NOT EXISTS account_configs (
+        account_id VARCHAR(64) NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        user_uuid VARCHAR(255) NOT NULL,
+        label VARCHAR(64) NOT NULL,
+        linked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_opened_at TIMESTAMP,
+        PRIMARY KEY (account_id, user_uuid)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_account_configs_uuid ON account_configs(user_uuid)`
     ];
 
     for (const query of queries) {
@@ -252,10 +380,10 @@ class Database {
     }
 
     if (this.type === 'sqlite') {
-      const statement = this.db.prepare(query);
+      const statement = this.readDb.prepare(query);
       return this.executeSQLiteStatement(statement, 'get', params) || null;
     } else {
-      const result = await this.db.query(query, params);
+      const result = await this.readDb.query(query, params);
       return result.rows[0] || null;
     }
   }
@@ -266,10 +394,10 @@ class Database {
     }
 
     if (this.type === 'sqlite') {
-      const statement = this.db.prepare(query);
+      const statement = this.readDb.prepare(query);
       return this.executeSQLiteStatement(statement, 'all', params);
     } else {
-      const result = await this.db.query(query, params);
+      const result = await this.readDb.query(query, params);
       return result.rows;
     }
   }
@@ -278,7 +406,9 @@ class Database {
     return crypto.randomUUID();
   }
 
-  async saveUserConfig(userUUID: string, passwordHash: string, configData: any): Promise<void> {
+  async saveUserConfig(userUUID: string, passwordHash: string, configData: any): Promise<any> {
+    require('./signinGate').assertConfigWriteAllowed();
+
     let normalizedConfig = configData;
 
     if (typeof normalizedConfig === 'string') {
@@ -328,6 +458,12 @@ class Database {
          DO UPDATE SET password_hash = $2, config_data = $3, updated_at = CURRENT_TIMESTAMP`,
         [userUUID, passwordHash, configJson]
       );
+    }
+
+    try {
+      return JSON.parse(configJson);
+    } catch {
+      return null;
     }
   }
 
@@ -499,6 +635,7 @@ class Database {
       ? 'DELETE FROM user_configs WHERE user_uuid = ?'
       : 'DELETE FROM user_configs WHERE user_uuid = $1';
     await this.runQuery(query, [userUUID]);
+    await this.unlinkConfigFromAllAccounts(userUUID);
   }
 
   async deleteUser(userUUID: string): Promise<boolean> {
@@ -513,6 +650,12 @@ class Database {
         ? 'DELETE FROM trusted_uuids WHERE user_uuid = ?'
         : 'DELETE FROM trusted_uuids WHERE user_uuid = $1';
       await this.runQuery(deleteTrustedQuery, [userUUID]);
+
+      const deleteAliasQuery = this.type === 'sqlite'
+        ? 'DELETE FROM user_aliases WHERE user_uuid = ?'
+        : 'DELETE FROM user_aliases WHERE user_uuid = $1';
+      await this.runAliasCleanup(deleteAliasQuery, [userUUID]);
+      await this.unlinkConfigFromAllAccounts(userUUID);
 
       logger.info(`Successfully deleted user ${userUUID} and all associated data`);
       return userDeleted;
@@ -574,6 +717,67 @@ class Database {
     await this.runQuery(query, [userUUID]);
   }
 
+  private async runAliasCleanup(query: string, params: any[] = []): Promise<void> {
+    try {
+      await this.runQuery(query, params);
+    } catch (error: any) {
+      logger.warn(`Alias cleanup skipped: ${error.message}`);
+    }
+  }
+
+  async getAllUserAliases(): Promise<Array<{ alias: string; alias_lower: string; user_uuid: string }>> {
+    try {
+      return await this.allQuery('SELECT alias, alias_lower, user_uuid FROM user_aliases');
+    } catch (error) {
+      logger.error('Error loading user aliases:', error);
+      return [];
+    }
+  }
+
+  async setUserAlias(userUUID: string, alias: string, aliasLower: string): Promise<void> {
+    // Check the alias is free BEFORE touching this user's existing row. Without
+    // this, claiming a taken alias would delete the user's current alias and
+    // then fail on the insert, leaving them with no alias at all.
+    const ownerQuery = this.type === 'sqlite'
+      ? 'SELECT user_uuid FROM user_aliases WHERE alias_lower = ?'
+      : 'SELECT user_uuid FROM user_aliases WHERE alias_lower = $1';
+    const owner = await this.getQuery(ownerQuery, [aliasLower]);
+    if (owner && owner.user_uuid !== userUUID) {
+      const error: any = new Error(`UNIQUE constraint failed: alias "${alias}" is already taken`);
+      error.code = 'ALIAS_TAKEN';
+      throw error;
+    }
+
+    // One alias per user: drop any existing row for this user before claiming
+    // the new alias, so reassigning does not leave the old alias resolvable.
+    const deleteQuery = this.type === 'sqlite'
+      ? 'DELETE FROM user_aliases WHERE user_uuid = ?'
+      : 'DELETE FROM user_aliases WHERE user_uuid = $1';
+    await this.runQuery(deleteQuery, [userUUID]);
+
+    if (this.type === 'sqlite') {
+      await this.runQuery(
+        `INSERT INTO user_aliases (alias_lower, alias, user_uuid, created_at)
+         VALUES (?, ?, ?, CURRENT_TIMESTAMP)`,
+        [aliasLower, alias, userUUID]
+      );
+    } else {
+      await this.runQuery(
+        `INSERT INTO user_aliases (alias_lower, alias, user_uuid, created_at)
+         VALUES ($1, $2, $3, CURRENT_TIMESTAMP)`,
+        [aliasLower, alias, userUUID]
+      );
+    }
+  }
+
+  async deleteUserAlias(userUUID: string): Promise<boolean> {
+    const query = this.type === 'sqlite'
+      ? 'DELETE FROM user_aliases WHERE user_uuid = ?'
+      : 'DELETE FROM user_aliases WHERE user_uuid = $1';
+    const result = await this.runQuery(query, [userUUID]);
+    return this.type === 'sqlite' ? result.changes > 0 : result.rowCount > 0;
+  }
+
   async pruneAllIdMappings(): Promise<void> {
     const query = 'DELETE FROM id_mappings';
     await this.runQuery(query);
@@ -616,10 +820,15 @@ class Database {
       if (this.type === 'sqlite') {
         this.db.close();
         this.db = null;
+        this.readDb = null;
         this.initialized = false;
         return;
       } else {
+        if (this.readDb && this.readDb !== this.db) {
+          await this.readDb.end();
+        }
         await this.db.end();
+        this.readDb = null;
       }
     }
   }
@@ -657,7 +866,7 @@ class Database {
       } else {
         const placeholders = tokenIds.map((_, i) => `$${i + 1}`).join(', ');
         const query = `SELECT user_uuid, password_hash, config_data FROM user_configs
-          WHERE config_data->'apiKeys'->>'${tokenField}' IN (${placeholders})`;
+          WHERE config_data::jsonb->'apiKeys'->>'${tokenField}' IN (${placeholders})`;
         const rows = await this.allQuery(query, tokenIds);
         return rows.map(row => ({
           id: row.user_uuid,
@@ -690,10 +899,10 @@ class Database {
              user_uuid,
              created_at,
              updated_at,
-             CASE WHEN (config_data->'apiKeys'->>'tmdb') IS NOT NULL
-                    OR (config_data->'apiKeys'->>'tvdb') IS NOT NULL
-                    OR (config_data->'apiKeys'->>'imdb') IS NOT NULL
-                    OR (config_data->'apiKeys'->>'kitsu') IS NOT NULL
+             CASE WHEN (config_data::jsonb->'apiKeys'->>'tmdb') IS NOT NULL
+                    OR (config_data::jsonb->'apiKeys'->>'tvdb') IS NOT NULL
+                    OR (config_data::jsonb->'apiKeys'->>'imdb') IS NOT NULL
+                    OR (config_data::jsonb->'apiKeys'->>'kitsu') IS NOT NULL
                THEN true ELSE false END AS has_api_keys,
              CASE WHEN updated_at >= NOW() - INTERVAL '7 days' THEN true ELSE false END AS is_active
            FROM user_configs
@@ -701,8 +910,12 @@ class Database {
 
       const rows = await this.allQuery(query);
 
+      const aliasRows = await this.getAllUserAliases();
+      const aliasByUuid = new Map(aliasRows.map(row => [row.user_uuid, row.alias]));
+
       return rows.map(row => ({
         uuid: row.user_uuid,
+        alias: aliasByUuid.get(row.user_uuid) || null,
         created_at: row.created_at,
         last_updated: row.updated_at,
         last_activity: null,
@@ -840,6 +1053,10 @@ class Database {
 
       const result = await this.runQuery(query, [cutoffDateStr]);
 
+      await this.runAliasCleanup(
+        'DELETE FROM user_aliases WHERE user_uuid NOT IN (SELECT user_uuid FROM user_configs)'
+      );
+
       return this.type === 'sqlite' ? result.changes : result.rowCount;
     } catch (error) {
       logger.error('Error deleting inactive users:', error);
@@ -928,6 +1145,160 @@ class Database {
       logger.error('Error getting OAuth tokens by provider:', error);
       return [];
     }
+  }
+
+  // --- Accounts and config profiles ---
+
+  /**
+   * Keyed on (issuer, subject) rather than the username, because a provider
+   * rename would otherwise orphan every profile the account owns.
+   */
+  async upsertAccount(
+    issuer: string,
+    subject: string,
+    username: string,
+    email: string | null,
+    groups: string[] | null = null
+  ): Promise<any> {
+    const existing = await this.getQuery(
+      this.type === 'sqlite'
+        ? 'SELECT * FROM accounts WHERE issuer = ? AND subject = ?'
+        : 'SELECT * FROM accounts WHERE issuer = $1 AND subject = $2',
+      [issuer, subject]
+    );
+    const groupsJson = groups === null ? null : JSON.stringify(groups);
+
+    if (existing) {
+      await this.runQuery(
+        this.type === 'sqlite'
+          ? 'UPDATE accounts SET username = ?, email = ?, groups_json = ?, last_seen_at = CURRENT_TIMESTAMP WHERE id = ?'
+          : 'UPDATE accounts SET username = $1, email = $2, groups_json = $3, last_seen_at = CURRENT_TIMESTAMP WHERE id = $4',
+        [username, email, groupsJson, existing.id]
+      );
+      return { ...existing, username, email, groups_json: groupsJson };
+    }
+
+    const id = crypto.randomUUID();
+    await this.runQuery(
+      this.type === 'sqlite'
+        ? 'INSERT INTO accounts (id, issuer, subject, username, email, groups_json) VALUES (?, ?, ?, ?, ?, ?)'
+        : 'INSERT INTO accounts (id, issuer, subject, username, email, groups_json) VALUES ($1, $2, $3, $4, $5, $6)',
+      [id, issuer, subject, username, email, groupsJson]
+    );
+    return { id, issuer, subject, username, email, groups_json: groupsJson, blocked: 0 };
+  }
+
+  async setAccountBlocked(accountId: string, blocked: boolean): Promise<void> {
+    await this.runQuery(
+      this.type === 'sqlite'
+        ? 'UPDATE accounts SET blocked = ? WHERE id = ?'
+        : 'UPDATE accounts SET blocked = $1 WHERE id = $2',
+      [blocked ? 1 : 0, accountId]
+    );
+  }
+
+  async getAccount(accountId: string): Promise<any> {
+    return await this.getQuery(
+      this.type === 'sqlite'
+        ? 'SELECT * FROM accounts WHERE id = ?'
+        : 'SELECT * FROM accounts WHERE id = $1',
+      [accountId]
+    );
+  }
+
+  async listAccounts(): Promise<any[]> {
+    return await this.allQuery(
+      `SELECT id, issuer, subject, username, email, groups_json, blocked, created_at, last_seen_at
+         FROM accounts
+        ORDER BY last_seen_at DESC NULLS LAST, created_at DESC`,
+      []
+    );
+  }
+
+  async deleteAccount(accountId: string): Promise<void> {
+    await this.runQuery(
+      this.type === 'sqlite'
+        ? 'DELETE FROM accounts WHERE id = ?'
+        : 'DELETE FROM accounts WHERE id = $1',
+      [accountId]
+    );
+  }
+
+  /** Profiles with the config still present, newest use first. */
+  async getAccountConfigs(accountId: string): Promise<any[]> {
+    return await this.allQuery(
+      this.type === 'sqlite'
+        ? `SELECT ac.user_uuid, ac.label, ac.linked_at, ac.last_opened_at
+             FROM account_configs ac
+             JOIN user_configs uc ON uc.user_uuid = ac.user_uuid
+            WHERE ac.account_id = ?
+            ORDER BY ac.last_opened_at DESC NULLS LAST, ac.linked_at DESC`
+        : `SELECT ac.user_uuid, ac.label, ac.linked_at, ac.last_opened_at
+             FROM account_configs ac
+             JOIN user_configs uc ON uc.user_uuid = ac.user_uuid
+            WHERE ac.account_id = $1
+            ORDER BY ac.last_opened_at DESC NULLS LAST, ac.linked_at DESC`,
+      [accountId]
+    );
+  }
+
+  async ownsConfig(accountId: string, userUUID: string): Promise<boolean> {
+    const row = await this.getQuery(
+      this.type === 'sqlite'
+        ? 'SELECT 1 AS ok FROM account_configs WHERE account_id = ? AND user_uuid = ?'
+        : 'SELECT 1 AS ok FROM account_configs WHERE account_id = $1 AND user_uuid = $2',
+      [accountId, userUUID]
+    );
+    return Boolean(row);
+  }
+
+  async countAccountConfigs(accountId: string): Promise<number> {
+    const row = await this.getQuery(
+      this.type === 'sqlite'
+        ? 'SELECT COUNT(*) AS n FROM account_configs WHERE account_id = ?'
+        : 'SELECT COUNT(*) AS n FROM account_configs WHERE account_id = $1',
+      [accountId]
+    );
+    return Number(row?.n || 0);
+  }
+
+  async linkAccountConfig(accountId: string, userUUID: string, label: string): Promise<void> {
+    await this.runQuery(
+      this.type === 'sqlite'
+        ? `INSERT INTO account_configs (account_id, user_uuid, label) VALUES (?, ?, ?)
+             ON CONFLICT(account_id, user_uuid) DO UPDATE SET label = excluded.label`
+        : `INSERT INTO account_configs (account_id, user_uuid, label) VALUES ($1, $2, $3)
+             ON CONFLICT (account_id, user_uuid) DO UPDATE SET label = EXCLUDED.label`,
+      [accountId, userUUID, label]
+    );
+  }
+
+  async unlinkAccountConfig(accountId: string, userUUID: string): Promise<void> {
+    await this.runQuery(
+      this.type === 'sqlite'
+        ? 'DELETE FROM account_configs WHERE account_id = ? AND user_uuid = ?'
+        : 'DELETE FROM account_configs WHERE account_id = $1 AND user_uuid = $2',
+      [accountId, userUUID]
+    );
+  }
+
+  async touchAccountConfig(accountId: string, userUUID: string): Promise<void> {
+    await this.runQuery(
+      this.type === 'sqlite'
+        ? 'UPDATE account_configs SET last_opened_at = CURRENT_TIMESTAMP WHERE account_id = ? AND user_uuid = ?'
+        : 'UPDATE account_configs SET last_opened_at = CURRENT_TIMESTAMP WHERE account_id = $1 AND user_uuid = $2',
+      [accountId, userUUID]
+    );
+  }
+
+  /** Called when a config goes away, since the link has no meaning without it. */
+  async unlinkConfigFromAllAccounts(userUUID: string): Promise<void> {
+    await this.runQuery(
+      this.type === 'sqlite'
+        ? 'DELETE FROM account_configs WHERE user_uuid = ?'
+        : 'DELETE FROM account_configs WHERE user_uuid = $1',
+      [userUUID]
+    );
   }
 }
 

@@ -1,10 +1,10 @@
 require("dotenv").config();
 import { getGenreList } from "./getGenreList.js";
 import { getLanguages } from "./getLanguages.js";
-import { fetchMDBListItems, parseMDBListItems, fetchMDBListBatchMediaInfo, fetchMDBListUpNext, parseMDBListUpNextItems } from "../utils/mdbList.js";
+import { fetchMDBListItems, parseMDBListItems, fetchMDBListBatchMediaInfo, fetchMDBListUpNext, parseMDBListUpNextItems, usesMdblistExternalItemsEndpoint, supportsMdblistScoreFilters } from "../utils/mdbList.js";
 import { fetchStremThruCatalog, parseStremThruItems } from "../utils/stremthru.js";
 import { fetchTraktWatchlistItems, fetchTraktFavoritesItems, fetchTraktRecommendationsItems, fetchTraktListItems, fetchTraktListItemsById, parseTraktItems, fetchTraktMostFavoritedItems, fetchTraktCalendarShows, fetchTraktSearchItems, getTraktAccessToken, fetchTraktUpNextEpisodes, fetchTraktUnwatchedEpisodes, fetchTraktTrendingItems, fetchTraktPopularItems, fetchTraktAnticipatedItems } from "../utils/traktUtils.js";
-import { fetchSimklTrendingItems, fetchSimklWatchlistItems, parseSimklItems, getSimklToken, fetchSimklCalendarItems, fetchSimklGenreItems, fetchSimklDvdReleases } from "../utils/simklUtils.js";
+import { fetchSimklTrendingItems, fetchSimklRecipeItems, fetchSimklWatchlistItems, parseSimklItems, getSimklToken, fetchSimklCalendarItems, fetchSimklGenreItems, fetchSimklDvdReleases } from "../utils/simklUtils.js";
 import { fetchLetterboxdList, parseLetterboxdItems, getLetterboxdGenreIdByName } from "../utils/letterboxdUtils.js";
 import { getFlixPatrolMetas } from "../utils/flixpatrolUtils.js";
 import { fetchResume, parseResumeItems, fetchListItems, parseListItems, fetchPickItems, parsePickItems } from "../utils/publicmetadbUtils.js";
@@ -17,10 +17,14 @@ import * as moviedb from "./getTmdb.js";
 import * as tvdb from './tvdb.js';
 import { to3LetterCode, to3LetterCountryCode } from './language-map.js';
 import { resolveAllIds } from './id-resolver.js';
-import { cacheWrapTvdbApi, cacheWrap, cacheWrapAniListCatalog, cacheWrapJikanApi, stableStringify } from './getCache.js';
+import { cacheWrapTvdbApi, cacheWrap, cacheWrapCatalog, cacheWrapAniListCatalog, cacheWrapJikanApi, cacheWrapGlobal, classifyResultAllowEmpty, stableStringify } from './getCache.js';
+import crypto from 'crypto';
 import { getTVDBContentRatingId } from '../utils/tvdbContentRating.js';
 import { getMeta } from './getMeta.js';
 import { resolveDynamicTmdbDiscoverParams } from './tmdbDiscoverDateTokens.js';
+import { roundRobinInterleaveTagged, mergedDedupKey, filterMetasByGenre, normalizeGenreKey } from '../utils/mergedCatalog.js';
+const { getTvmazeScheduleCatalog } = require('./tvmazeScheduleCatalog');
+const movielens = require('./movielens');
 
 const consola = require('consola');
 const database = require('./database.js');
@@ -79,6 +83,21 @@ async function getCatalog(type: string, language: string, page: number, id: stri
       const malDiscoverResults = await getMalDiscoverCatalog(type, id, genre, page, language, config, userUUID, includeVideos);
       return { metas: malDiscoverResults };
     }
+    else if (id.startsWith('mal.userlist.') || id === 'mal.suggestions') {
+      logger.debug(`Routing to MAL user list catalog handler for id: ${id}`);
+      const malUserListResults = await getMalUserListCatalog(type, id, page, language, config, userUUID);
+      return { metas: malUserListResults };
+    }
+    else if (id.startsWith('mal.')) {
+      logger.debug(`Routing to MAL catalog handler for id: ${id}`);
+      const malResults = await getMalCatalog(type, id, genre, page, language, config);
+      return { metas: malResults };
+    }
+    else if (id === 'tvmaze.schedule') {
+      logger.debug(`Routing to TVMaze schedule catalog handler`);
+      const tvmazeResults = await getTvmazeScheduleHandler(genre, page, language, config, userUUID);
+      return { metas: tvmazeResults };
+    }
     else if (id.startsWith('anilist.discover.')) {
      logger.debug(`Routing to AniList discover catalog handler for id: ${id}`);
      const anilistDiscoverResults = await getAniListDiscoverCatalog(type, id, genre, page, language, config, userUUID, includeVideos);
@@ -99,6 +118,11 @@ async function getCatalog(type: string, language: string, page: number, id: stri
       const simklResults = await getSimklCatalog(type, id, genre, page, language, config, userUUID, includeVideos, skip);
       return { metas: simklResults };
     }
+    else if (id.startsWith('movielens.')) {
+      logger.debug(`Routing to MovieLens catalog handler for id: ${id}`);
+      const movieLensResults = await getMovieLensCatalog(type, id, genre, page, language, config, userUUID, includeVideos);
+      return { metas: movieLensResults };
+    }
     else if (id.startsWith('flixpatrol.')) {
       logger.debug(`Routing to FlixPatrol catalog handler for id: ${id}`);
       const flixpatrolResults = await getFlixPatrolCatalog(type, id, genre, page, language, config, userUUID, includeVideos);
@@ -108,6 +132,13 @@ async function getCatalog(type: string, language: string, page: number, id: stri
       logger.debug(`Routing to PublicMetaDB catalog handler for id: ${id}`);
       const pmdbResults = await getPublicMetaDBCatalog(type, id, page, language, config, userUUID);
       return { metas: pmdbResults };
+    }
+    else if (id.startsWith('merged.')) {
+      logger.debug(`Routing to Merged catalog handler for id: ${id}`);
+      const mergedResults = await getMergedCatalog(
+        type, id, genre, page, language, config, userUUID, includeVideos, skip
+      );
+      return { metas: mergedResults };
     }
 
     else {
@@ -166,7 +197,7 @@ async function getMalDiscoverCatalog(
     if (genreName && genreName.toLowerCase() !== 'none') {
       const allAnimeGenres = await cacheWrapJikanApi('anime-genres', async () => {
         return await jikan.getAnimeGenres();
-      }, null, { skipVersion: true });
+      }, null);
 
       const selectedGenre = allAnimeGenres.find(
         (g: any) => g.name.toLowerCase() === genreName.toLowerCase()
@@ -206,6 +237,164 @@ async function getMalDiscoverCatalog(
     logger.error(`[MAL Discover] Error processing catalog ${catalogId}: ${err.message}`);
     return [];
   }
+}
+
+async function getMalCatalog(
+  type: string,
+  catalogId: string,
+  genre: string | null,
+  page: number,
+  language: string,
+  config: UserConfig
+): Promise<any[]> {
+  const decadeMap: Record<string, [string, string]> = {
+    'mal.80sDecade': ['1980-01-01', '1989-12-31'],
+    'mal.90sDecade': ['1990-01-01', '1999-12-31'],
+    'mal.00sDecade': ['2000-01-01', '2009-12-31'],
+    'mal.10sDecade': ['2010-01-01', '2019-12-31'],
+    'mal.20sDecade': ['2020-01-01', '2029-12-31'],
+  };
+
+  let animeResults: any[] = [];
+
+  if (catalogId === 'mal.airing') {
+    animeResults = await cacheWrapJikanApi(`mal-airing-${page}-${config.sfw}`, async () => {
+      return await jikan.getAiringNow(page, config);
+    }, 24 * 60 * 60);
+  } else if (catalogId === 'mal.upcoming') {
+    animeResults = await cacheWrapJikanApi(`mal-upcoming-${page}-${config.sfw}`, async () => {
+      return await jikan.getUpcoming(page, config);
+    }, 24 * 60 * 60);
+  } else if (catalogId === 'mal.top_movies') {
+    animeResults = await cacheWrapJikanApi(`mal-top-movies-${page}-${config.sfw}`, async () => {
+      return await jikan.getTopAnimeByType('movie', page, config);
+    }, null);
+  } else if (catalogId === 'mal.top_series') {
+    animeResults = await cacheWrapJikanApi(`mal-top-series-${page}-${config.sfw}`, async () => {
+      return await jikan.getTopAnimeByType('tv', page, config);
+    }, null);
+  } else if (catalogId === 'mal.most_popular') {
+    animeResults = await cacheWrapJikanApi(`mal-most-popular-${page}-${config.sfw}`, async () => {
+      return await jikan.getTopAnimeByFilter('bypopularity', page, config);
+    }, null);
+  } else if (catalogId === 'mal.most_favorites') {
+    animeResults = await cacheWrapJikanApi(`mal-most-favorites-${page}-${config.sfw}`, async () => {
+      return await jikan.getTopAnimeByFilter('favorite', page, config);
+    }, null);
+  } else if (catalogId === 'mal.top_anime') {
+    animeResults = await cacheWrapJikanApi(`mal-top-anime-${page}-${config.sfw}`, async () => {
+      return await jikan.getTopAnimeByType('anime', page, config);
+    }, null);
+  } else if (catalogId === 'mal.season_top') {
+    animeResults = await cacheWrapJikanApi(`mal-season-top-${page}-${config.sfw}`, async () => {
+      return await jikan.getSeasonTopRated(page, config);
+    }, 24 * 60 * 60);
+  } else if (catalogId === 'mal.season_top_new') {
+    animeResults = await cacheWrapJikanApi(`mal-season-top-new-${page}-${config.sfw}`, async () => {
+      return await jikan.getSeasonTopNew(page, config);
+    }, 24 * 60 * 60);
+  } else if (decadeMap[catalogId]) {
+    const [startDate, endDate] = decadeMap[catalogId];
+    const allAnimeGenres = await cacheWrapJikanApi('anime-genres', async () => {
+      return await jikan.getAnimeGenres();
+    }, null);
+    const genreNameToFetch = genre && genre !== 'None' ? genre : allAnimeGenres[0]?.name;
+    if (genreNameToFetch) {
+      const selectedGenre = allAnimeGenres.find((g: any) => g.name === genreNameToFetch);
+      if (selectedGenre) {
+        const genreId = selectedGenre.mal_id;
+        animeResults = await cacheWrapJikanApi(`mal-${catalogId}-${page}-${genreId}-${config.sfw}`, async () => {
+          return await jikan.getTopAnimeByDateRange(startDate, endDate, page, genreId, config);
+        }, null);
+      }
+    }
+  } else if (catalogId === 'mal.genres') {
+    const mediaType = null;
+    const allAnimeGenres = await cacheWrapJikanApi('anime-genres', async () => {
+      return await jikan.getAnimeGenres();
+    }, null);
+    const genreNameToFetch = genre || allAnimeGenres[0]?.name;
+    if (genreNameToFetch) {
+      const selectedGenre = allAnimeGenres.find((g: any) => g.name === genreNameToFetch);
+      if (selectedGenre) {
+        const genreId = selectedGenre.mal_id;
+        animeResults = await cacheWrapJikanApi(`mal-genre-${genreId}-${mediaType || 'all'}-${page}-${config.sfw}`, async () => {
+          return await jikan.getAnimeByGenre(genreId, mediaType, page, config);
+        }, null);
+      }
+    }
+  } else if (catalogId === 'mal.studios') {
+    if (genre) {
+      const studios = await cacheWrapJikanApi('mal-studios', () => jikan.getStudios(100), null);
+      const selectedStudio = studios.find((studio: any) => {
+        const defaultTitle = studio.titles.find((t: any) => t.type === 'Default');
+        return defaultTitle && defaultTitle.title === genre;
+      });
+      if (selectedStudio) {
+        const studioId = selectedStudio.mal_id;
+        animeResults = await cacheWrapJikanApi(`mal-studio-${studioId}-${page}-${config.sfw}`, async () => {
+          return await jikan.getAnimeByStudio(studioId, page);
+        }, null);
+      }
+    }
+  } else if (catalogId === 'mal.schedule') {
+    const dayOfWeek = genre || 'Monday';
+    animeResults = await cacheWrapJikanApi(`mal-schedule-${dayOfWeek}-${page}-${config.sfw}`, async () => {
+      return await jikan.getAiringSchedule(dayOfWeek, page, config);
+    }, null);
+  } else if (catalogId === 'mal.seasons') {
+    let seasonString = genre ? decodeURIComponent(genre) : null;
+    if (!seasonString) {
+      const currentDate = new Date();
+      const currentYear = currentDate.getFullYear();
+      const currentMonth = currentDate.getMonth();
+      let currentSeason: string;
+      if (currentMonth <= 2) currentSeason = 'Winter';
+      else if (currentMonth <= 5) currentSeason = 'Spring';
+      else if (currentMonth <= 8) currentSeason = 'Summer';
+      else currentSeason = 'Fall';
+      seasonString = `${currentSeason} ${currentYear}`;
+    }
+    const parts = seasonString.split(' ');
+    const season = parts[0].toLowerCase();
+    const year = parseInt(parts[1]);
+    animeResults = await cacheWrapJikanApi(`mal-season-${year}-${season}-${page}-${config.sfw}`, async () => {
+      return await jikan.getAnimeBySeason(year, season, page, config);
+    }, null);
+  } else {
+    logger.warn(`[MAL] Unknown catalog id: ${catalogId}`);
+    return [];
+  }
+
+  return await Utils.parseAnimeCatalogMetaBatch(animeResults, config, language);
+}
+
+async function getTvmazeScheduleHandler(
+  genre: string | null,
+  page: number,
+  language: string,
+  config: UserConfig,
+  userUUID: string
+): Promise<any[]> {
+  const tz = config.timezone || process.env.TZ || 'UTC';
+  const formatter = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
+  const date = formatter.format(new Date());
+  const country = genre && genre !== 'None' ? genre.toUpperCase() : '';
+  const pageSize = 20;
+
+  const result = await getTvmazeScheduleCatalog({
+    date,
+    country,
+    page,
+    pageSize,
+    language,
+    config,
+    userUUID,
+    includeVideos: false,
+    enableErrorCaching: true,
+    maxRetries: 2,
+  });
+  return result.metas;
 }
 
 /**
@@ -651,10 +840,7 @@ async function getTmdbAndMdbListCatalog(type: string, id: string, genre: string,
       return metas;
     }
     
-    const isExternalListUrl = catalogConfig?.sourceUrl?.includes('/external/lists/');
-    const isByNameItemsUrl = catalogConfig?.sourceUrl
-      && /api\.mdblist\.com\/lists\/[^/]+\/[^/]+\/items/.test(catalogConfig.sourceUrl);
-    if (catalogConfig?.sourceUrl && (isExternalListUrl || isByNameItemsUrl)) {
+    if (usesMdblistExternalItemsEndpoint(catalogConfig)) {
       logger.info(`Fetching MDBList list from sourceUrl: ${catalogConfig.sourceUrl}`);
 
       const sort = catalogConfig?.sort === 'default' ? undefined : catalogConfig?.sort;
@@ -709,6 +895,9 @@ async function getTmdbAndMdbListCatalog(type: string, id: string, genre: string,
       // Non-unified watchlist (separate movies/series catalogs)
       listId = 'watchlist';
       unified = false;
+    } else if (id.startsWith('mdblist.recommended.')) {
+      listId = `recommended/${id.split('.')[2]}`;
+      unified = true;
     } else {
       // Regular MDBList catalog
       listId = id.split(".")[1];
@@ -719,7 +908,21 @@ async function getTmdbAndMdbListCatalog(type: string, id: string, genre: string,
       }
     }
     
-    const response = await fetchMDBListItems(listId, config.apiKeys?.mdblist || process.env.MDBLIST_API_KEY || '', language, page, sort, order, genreSlug, unified, type, catalogConfig?.cacheTTL);
+    const scoreFiltersAllowed = supportsMdblistScoreFilters(catalogConfig);
+    const response = await fetchMDBListItems(
+      listId,
+      config.apiKeys?.mdblist || process.env.MDBLIST_API_KEY || '',
+      language,
+      page,
+      sort,
+      order,
+      genreSlug,
+      unified,
+      type,
+      catalogConfig?.cacheTTL,
+      scoreFiltersAllowed ? catalogConfig?.filter_score_min : undefined,
+      scoreFiltersAllowed ? catalogConfig?.filter_score_max : undefined
+    );
     
     // Smart pagination handling
     if (listId === 'watchlist') {
@@ -806,6 +1009,24 @@ async function getTmdbAndMdbListCatalog(type: string, id: string, genre: string,
       type as 'movie' | 'series'
     );
 
+    // TMDB's discover/tv runtime filter matches only on episode_run_time, which is
+    // empty for many shows, so it silently drops them. Filter locally instead,
+    // falling back to last/next episode runtime (same chain getMeta uses for display).
+    let runtimeGte: number | null = null;
+    let runtimeLte: number | null = null;
+    if (mediaType === 'tv') {
+      const gte = Number(parameters['with_runtime.gte']);
+      const lte = Number(parameters['with_runtime.lte']);
+      if (parameters['with_runtime.gte'] !== undefined) {
+        delete parameters['with_runtime.gte'];
+        if (Number.isFinite(gte)) runtimeGte = gte;
+      }
+      if (parameters['with_runtime.lte'] !== undefined) {
+        delete parameters['with_runtime.lte'];
+        if (Number.isFinite(lte)) runtimeLte = lte;
+      }
+    }
+
     try {
       const response = mediaType === 'movie'
         ? await moviedb.discoverMovie(parameters, config)
@@ -816,8 +1037,33 @@ async function getTmdbAndMdbListCatalog(type: string, id: string, genre: string,
         return [];
       }
 
+      let results = response.results;
+      if (runtimeGte !== null || runtimeLte !== null) {
+        const checked = await mapWithLimit(results, async (item: any) => {
+          try {
+            const details = await moviedb.tvInfo({ id: item.id, language }, config);
+            const runtime = [
+              details?.episode_run_time?.[0],
+              details?.last_episode_to_air?.runtime,
+              details?.next_episode_to_air?.runtime,
+            ].find((r: any) => typeof r === 'number' && r > 0);
+            if (runtime === undefined) return item; // runtime unknown → keep
+            if (runtimeGte !== null && runtime < runtimeGte) return null;
+            if (runtimeLte !== null && runtime > runtimeLte) return null;
+            return item;
+          } catch {
+            return item;
+          }
+        });
+        results = checked.filter((item: any) => item !== null);
+        if (results.length < response.results.length) {
+          logger.info(`[TMDB Discover] Runtime filter kept ${results.length}/${response.results.length} items for ${id} at page ${discoverPage}`);
+        }
+        if (results.length === 0) return [];
+      }
+
       const metaType = mediaType === 'movie' ? 'movie' : 'series';
-      const metas = await mapWithLimit(response.results, async (item: any) => {
+      const metas = await mapWithLimit(results, async (item: any) => {
         const stremioId = `tmdb:${item.id}`;
 
         try {
@@ -1037,19 +1283,19 @@ async function buildParameters(type: string, language: string, page: number, id:
     switch (config.ageRating) {
       case "G":
         parameters.certification_country = "US";
-        parameters.certification = type === "movie" ? "G" : "TV-G";
+        parameters.certification = type === "movie" ? "G" : ["TV-Y", "TV-Y7", "TV-G"].join("|");
         break;
       case "PG":
         parameters.certification_country = "US";
-        parameters.certification = type === "movie" ? ["G", "PG"].join("|") : ["TV-G", "TV-PG"].join("|");
+        parameters.certification = type === "movie" ? ["G", "PG"].join("|") : ["TV-Y", "TV-Y7", "TV-G", "TV-PG"].join("|");
         break;
       case "PG-13":
         parameters.certification_country = "US";
-        parameters.certification = type === "movie" ? ["G", "PG", "PG-13"].join("|") : ["TV-G", "TV-PG", "TV-14"].join("|");
+        parameters.certification = type === "movie" ? ["G", "PG", "PG-13"].join("|") : ["TV-Y", "TV-Y7", "TV-G", "TV-PG", "TV-14"].join("|");
         break;
       case "R":
         parameters.certification_country = "US";
-        parameters.certification = type === "movie" ? ["G", "PG", "PG-13", "R"].join("|") : ["TV-G", "TV-PG", "TV-14", "TV-MA"].join("|");
+        parameters.certification = type === "movie" ? ["G", "PG", "PG-13", "R"].join("|") : ["TV-Y", "TV-Y7", "TV-G", "TV-PG", "TV-14", "TV-MA"].join("|");
         break;
       case "NC-17":
         break;
@@ -1116,6 +1362,9 @@ async function buildParameters(type: string, language: string, page: number, id:
       case "tmdb.year":
         const year = genre && genre.toLowerCase() !== 'none' ? genre : new Date().getFullYear();
         parameters[type === "movie" ? "primary_release_year" : "first_air_date_year"] = year;
+        if (catalogConfig?.minVotes !== undefined && catalogConfig.minVotes !== null) {
+          parameters['vote_count.gte'] = catalogConfig.minVotes;
+        }
         // Only set default sort if no custom sort is configured
         if (!catalogConfig?.sort) {
           parameters.sort_by = 'popularity.desc';
@@ -1386,10 +1635,6 @@ function sanitizeTmdbDiscoverParams(
     }
   }
 
-  if (sanitized.sort_by === 'vote_average.desc' && sanitized['vote_count.gte'] === undefined) {
-    sanitized['vote_count.gte'] = 50;
-  }
-
   // Certification filters should be sent as a pair
   const hasCertValue = !!sanitized.certification || !!sanitized['certification.gte'] || !!sanitized['certification.lte'];
   if (!!sanitized.certification && !sanitized.certification_country) {
@@ -1436,6 +1681,8 @@ function findProvider(providerId: string): any {
   return provider;
 }
 
+const EXTERNAL_SEEN_ID_MEMORY = 500;
+
 async function getExternalAddonCatalog(type: string, catalogId: string, genre: string, page: number, language: string, config: UserConfig, userUUID: string, includeVideos: boolean = false, skip?: number): Promise<any[]> {
   try {
     const userCatalog = config.catalogs?.find(c => c.id === catalogId && c.type === type);
@@ -1452,6 +1699,7 @@ async function getExternalAddonCatalog(type: string, catalogId: string, genre: s
 
     const cursorKey = useCursor ? `catalog-cursor:${userUUID}:${catalogId}:${type}:${genre || 'all'}` : null;
     let upstreamSkip: number;
+    const seenIds = new Set<string>();
 
     if (!useCursor) {
       upstreamSkip = stremioSkip;
@@ -1464,6 +1712,7 @@ async function getExternalAddonCatalog(type: string, catalogId: string, genre: s
         const cursor = JSON.parse(raw);
         if (cursor.served === stremioSkip) {
           upstreamSkip = cursor.upstreamOffset;
+          for (const id of cursor.seenIds || []) seenIds.add(id);
         } else {
           logger.debug(`[External Addon] ${catalogId}: cursor mismatch (served=${cursor.served}, skip=${stremioSkip}) - falling back to skip offset`);
           upstreamSkip = stremioSkip;
@@ -1477,33 +1726,59 @@ async function getExternalAddonCatalog(type: string, catalogId: string, genre: s
 
     logger.info(`[External Addon] ${catalogId}: type=${type}, stremioSkip=${stremioSkip}, upstreamSkip=${upstreamSkip}, genre=${genre || 'none'}`);
 
-    const cacheKey = `custom-batch:${catalogId}:${genre || 'all'}:skip=${upstreamSkip}`;
-    const items = await cacheWrap(cacheKey, async () => {
-      return await fetchStremThruCatalog(catalogUrl, upstreamSkip, genre);
-    }, catalogTTL, { enableErrorCaching: true, maxRetries: 2 });
+    // Filter here (not at the catalog route) so the pagination cursor below counts
+    // post-filter items. The route detects this via filtersAlreadyApplied and skips re-filtering.
+    const { applyCatalogFilters, catalogFiltersActive } = require('../utils/catalogFilters.js');
+    const { fillMaxPages } = require('./catalogPagination');
 
-    if (!items?.length) {
-      logger.debug(`[External Addon] No items returned for ${catalogId} at skip=${upstreamSkip}`);
-      return [];
-    }
+    const readBatch = async (offset: number) => {
+      const cacheKey = `custom-batch:${catalogId}:${genre || 'all'}:skip=${offset}`;
+      return await cacheWrap(cacheKey, async () => {
+        return await fetchStremThruCatalog(catalogUrl, offset, genre);
+      }, catalogTTL, { enableErrorCaching: true, maxRetries: 2 });
+    };
 
-    const { applyCatalogFilters } = require('../utils/catalogFilters.js');
     const collected: any[] = [];
+    let offset = upstreamSkip;
+    let batchesRead = 0;
 
-    for (let i = 0; i < items.length; i += batchSize) {
-      const chunk = items.slice(i, i + batchSize);
-      let metas = await parseStremThruItems(chunk, type, genre, language, config, includeVideos);
-      metas = await applyCatalogFilters(metas, { type, config, catalogConfig: userCatalog, cleanId: catalogId });
-      collected.push(...metas);
+    const filtersActive = catalogFiltersActive({ config, catalogConfig: userCatalog, cleanId: catalogId });
+    const maxBatches = filtersActive ? fillMaxPages() : 1;
+
+    while (collected.length < batchSize && batchesRead < maxBatches) {
+      const items = await readBatch(offset);
+      batchesRead += 1;
+      if (!items?.length) {
+        logger.debug(`[External Addon] No items returned for ${catalogId} at skip=${offset}`);
+        break;
+      }
+
+      for (let i = 0; i < items.length; i += batchSize) {
+        const chunk = items.slice(i, i + batchSize);
+        let metas = await parseStremThruItems(chunk, type, genre, language, config, includeVideos);
+        metas = await applyCatalogFilters(metas, { type, config, catalogConfig: userCatalog, cleanId: catalogId });
+        for (const meta of metas) {
+          const id = meta?.id;
+          if (id && seenIds.has(id)) continue;
+          if (id) seenIds.add(id);
+          collected.push(meta);
+        }
+      }
+      offset += items.length;
     }
 
-    if (cursorKey && collected.length > 0) {
+    if (cursorKey && offset > upstreamSkip) {
       const newServed = stremioSkip + collected.length;
-      const newUpstream = upstreamSkip + items.length;
-      await redis!.set(cursorKey, JSON.stringify({ served: newServed, upstreamOffset: newUpstream }), 'EX', catalogTTL);
+      const recentIds = [...seenIds].slice(-EXTERNAL_SEEN_ID_MEMORY);
+      await redis!.set(
+        cursorKey,
+        JSON.stringify({ served: newServed, upstreamOffset: offset, seenIds: recentIds }),
+        'EX',
+        catalogTTL
+      );
     }
 
-    logger.success(`[External Addon] ${catalogId}: ${collected.length}/${items.length} items (stremioSkip=${stremioSkip}, nextUpstream=${upstreamSkip + items.length})`);
+    logger.success(`[External Addon] ${catalogId}: ${collected.length} items from ${batchesRead} batch(es) (stremioSkip=${stremioSkip}, nextUpstream=${offset})`);
     return collected;
 
   } catch (err: any) {
@@ -1820,7 +2095,8 @@ async function getTraktCatalog(
       }
 
       const privacy = catalogConfig?.metadata?.privacy || 'public';
-      const listAccessToken = privacy === 'public'
+      // Unauthenticated Trakt requests hit their CDN cache (s-maxage=3600)
+      const listAccessToken = (privacy === 'public' && !config.apiKeys?.traktTokenId)
         ? ''
         : (await ensureTraktAccessToken() || '');
 
@@ -2108,6 +2384,85 @@ async function resolveAniListItemsToMetas(
 }
 
 /**
+ * Get a MAL user anime list catalog (mal.userlist.<status>)
+ * Fetches the connected user's list from the MAL API using their OAuth token.
+ */
+async function getMalUserListCatalog(
+  type: string,
+  catalogId: string,
+  page: number,
+  language: string,
+  config: UserConfig,
+  userUUID: string
+): Promise<any[]> {
+  try {
+    const malTracker = require('./malTracker');
+    const isSuggestions = catalogId === 'mal.suggestions';
+    const status = catalogId.replace('mal.userlist.', '');
+    if (!isSuggestions && !malTracker.MAL_USERLIST_STATUSES.includes(status)) {
+      logger.error(`[MAL] Unknown user list status for catalog: ${catalogId}`);
+      return [];
+    }
+
+    const accessToken = await malTracker.getValidAccessToken(userUUID);
+    if (!accessToken) {
+      logger.warn(`[MAL] No valid access token for user ${userUUID} (catalog: ${catalogId})`);
+      return [];
+    }
+
+    const catalogConfig = config.catalogs?.find(c => c.id === catalogId);
+    const pageSize = parseInt(process.env.CATALOG_LIST_ITEMS_SIZE as string) || 20;
+    const offset = (page - 1) * pageSize;
+    const sort = catalogConfig?.sort || 'list_updated_at';
+    const nsfw = !config.sfw;
+
+    const response = isSuggestions
+      ? await malTracker.fetchMalSuggestions(accessToken, offset, pageSize, nsfw)
+      : await malTracker.fetchMalUserList(status, accessToken, offset, pageSize, sort, nsfw);
+    logger.debug(`[MAL] Fetched ${response.items.length} items from "${isSuggestions ? 'suggestions' : status}", hasMore: ${response.hasMore}`);
+
+    if (response.items.length === 0) {
+      return [];
+    }
+
+    const newItems = response.items.map((item: any) => {
+      const node = item.node || {};
+      return {
+        mal_id: node.id,
+        type: node.media_type === 'movie' ? 'movie' : 'series',
+        title: node.title,
+        title_english: node.alternative_titles?.en || null,
+        year: node.start_date ? parseInt(String(node.start_date).slice(0, 4), 10) : null,
+        duration: node.average_episode_duration ? `${Math.round(node.average_episode_duration / 60)} min per ep` : null,
+        episodes: node.num_episodes || null,
+        synopsis: node.synopsis || null,
+        images: {
+          jpg: {
+            large_image_url: node.main_picture?.large || node.main_picture?.medium || null
+          }
+        },
+        aired: {
+          from: node.start_date || null,
+          to: node.end_date || null
+        },
+        status: node.end_date ? 'Finished Airing' : 'Currently Airing'
+      };
+    });
+
+    const metas = await Utils.parseAnimeCatalogMetaBatch(newItems, config, language);
+    const validMetas = metas.filter((meta: any) => meta !== null);
+
+    logger.success(`[MAL] Processed ${validMetas.length} items for catalog ${catalogId} (page ${page})`);
+    return validMetas;
+  } catch (err: any) {
+    const errorLine = err.stack?.split('\n')[1]?.trim() || 'unknown';
+    logger.error(`[MAL] Error processing user list catalog ${catalogId}: ${err.message}`);
+    logger.error(`Error at: ${errorLine}`);
+    return [];
+  }
+}
+
+/**
  * Get Letterboxd catalog via StremThru API
  */
 async function getLetterboxdCatalog(
@@ -2317,6 +2672,111 @@ function sanitizeSimklDiscoverParams(
  * Get Simkl catalog items
  * Handles 'simkl.*' catalog IDs (e.g., simkl.trending.movies, simkl.trending.shows, simkl.trending.anime)
  */
+async function getMovieLensCatalog(
+  type: string,
+  catalogId: string,
+  genre: string,
+  page: number,
+  language: string,
+  config: UserConfig,
+  userUUID: string,
+  includeVideos: boolean = false
+): Promise<any[]> {
+  try {
+    if (type !== 'movie') return [];
+    const credId = config.apiKeys?.movieLensCredId;
+    if (!credId) {
+      logger.warn(`[MovieLens] Catalog ${catalogId} requested but no MovieLens account is connected`);
+      return [];
+    }
+
+    const catalogConfig = config.catalogs?.find(c => c.id === catalogId);
+    const pageSize = parseInt(process.env.CATALOG_LIST_ITEMS_SIZE || '20');
+    const ttl = catalogConfig?.cacheTTL !== undefined
+      ? catalogConfig.cacheTTL
+      : parseInt(process.env.MOVIELENS_CATALOG_TTL_SECONDS || '3600', 10);
+    const genreName = genre && genre.toLowerCase() !== 'none' ? genre.toLowerCase() : undefined;
+
+    const isList = catalogId.startsWith('movielens.list.');
+    const isExplore = catalogId.startsWith('movielens.explore');
+
+    const metadata: any = catalogConfig?.metadata || {};
+    const sortBy = metadata.sortBy || 'prediction';
+    const minYear = metadata.minYear;
+    const maxYear = metadata.maxYear;
+    const minPop = metadata.minPop ?? (sortBy === 'avgRating' ? 100 : sortBy === 'releaseDate' ? 20 : undefined);
+    const maxDaysAgo = metadata.maxDaysAgo;
+    // always exclude unreleased titles from "explore" catalogs.
+    // but obey API rule: drop maxFutureDays if the user wants maxYear instead.
+    const maxFutureDays = maxYear !== undefined
+      ? undefined
+      : (metadata.maxFutureDays ?? (isExplore ? 0 : undefined));
+    const sortDirection = metadata.sortDirection;
+    // always include rated movies if sorting by "your rating".
+    const onlyIncludeRated = sortBy === 'userRating' || sortBy === 'userRatedDate';
+    const includeRated = onlyIncludeRated || metadata.includeRated === true;
+    let tag = String(metadata.tags || '')
+      .split(',').map((s: string) => s.trim()).filter(Boolean).join(',') || undefined;
+
+    if (!tag && isExplore) {
+      const metaTtl = parseInt(
+        process.env.MOVIELENS_USERMETA_TTL_SECONDS || process.env.MOVIELENS_GROUPTAGS_TTL_SECONDS || '43200', 10);
+      const userMeta: any = await cacheWrapGlobal(`movielens-usermeta:${credId}`,
+        async () => movielens.getUserMeta(credId), metaTtl);
+      if (userMeta?.engineId === 'bard' && Array.isArray(userMeta.groupTags) && userMeta.groupTags.length) {
+        tag = userMeta.groupTags.map((t: string) => t.trim()).filter(Boolean).join(',');
+      }
+    }
+
+    const filterKey = `${sortBy}:${sortDirection || ''}:${tag || ''}:${minYear || ''}:${maxYear || ''}:${minPop || ''}:${maxFutureDays ?? ''}:${maxDaysAgo || ''}:${includeRated ? (onlyIncludeRated ? 'r-y' : 'r-a') : 'r-n'}`;
+    const cacheKey = `movielens-catalog:${credId}:${catalogId}:${genreName || 'all'}:${filterKey}:${page}:${pageSize}`;
+    const items = await cacheWrapGlobal(cacheKey, async () => {
+      if (isList) {
+        const listId = catalogId.slice('movielens.list.'.length);
+        const listUserId = catalogConfig?.metadata?.listUserId;
+        if (!listUserId) return [];
+        const offset = (page - 1) * pageSize;
+        const need = offset + pageSize;
+        const maxListPages = parseInt(process.env.MOVIELENS_LIST_MAX_PAGES || '50', 10);
+        const collected: any[] = [];
+        let serverPageSize: number | null = null;
+        for (let lp = 1; lp <= maxListPages; lp++) {
+          const lpItems = await movielens.getListItems(credId, listUserId, listId, { page: lp });
+          if (!Array.isArray(lpItems) || lpItems.length === 0) break;
+          if (serverPageSize === null) serverPageSize = lpItems.length;
+          collected.push(...lpItems);
+          if (collected.length >= need || lpItems.length < serverPageSize) break;
+        }
+        return collected.slice(offset, offset + pageSize);
+      }
+      if (catalogId === 'movielens.watchlist') {
+        return movielens.wishlist(credId, { genre: genreName, page, pageSize });
+      }
+      return movielens.explore(credId, {
+        // "yes" = only rated, "no" = exclude rated, undefined = include both (all).
+        hasRated: includeRated ? (onlyIncludeRated ? 'yes' : undefined) : 'no',
+        sortBy, sortDirection, tag, genre: genreName, minYear, maxYear, minPop, maxFutureDays, maxDaysAgo, page, pageSize,
+      });
+    }, ttl, { resultClassifier: classifyResultAllowEmpty });
+    const windowItems = Array.isArray(items) ? items : [];
+
+    const mdblistShaped = windowItems
+      .map((r: any) => {
+        const m = r?.movie || {};
+        if (!m.tmdbMovieId) return null;
+        return { mediatype: 'movie', id: m.tmdbMovieId, title: m.title };
+      })
+      .filter(Boolean);
+
+    const metas = await parseMDBListItems(mdblistShaped, 'movie', language, config, includeVideos);
+    logger.info(`[MovieLens] ${catalogId} page ${page} (genre: ${genreName || 'all'}): ${metas.length} metas`);
+    return metas;
+  } catch (error: any) {
+    logger.error(`[MovieLens] Catalog ${catalogId} failed: ${error.message}`);
+    return [];
+  }
+}
+
 async function getSimklCatalog(
   type: string,
   catalogId: string,
@@ -2397,6 +2857,20 @@ async function getSimklCatalog(
         const ok = !!(ids.imdb || ids.tmdb || ids.tvdb || ids.mal || ids.anilist || ids.kitsu || ids.anidb || ids.simkl || ids.simkl_id);
         if (!ok) logger.debug(`[Simkl] Skipping trending anime item with only simkl ID: ${JSON.stringify(it)}`);
         return ok;
+      });
+      response = { items, hasMore: result.hasMore, totalItems: result.totalItems };
+    } else if (catalogId.startsWith('simkl.recipe.')) {
+      const parts = catalogId.split('.');
+      const recipe = parts[2];
+      const recipeType = (parts[3] || 'movies') as 'movies' | 'shows' | 'anime';
+      const interval: 'today' | 'week' | 'month' = (genre && ['today', 'week', 'month'].includes(genre.toLowerCase())
+        ? genre.toLowerCase() as 'today' | 'week' | 'month'
+        : (catalogConfig?.metadata?.interval as 'today' | 'week' | 'month')) || 'week';
+      logger.debug(`[Simkl] Fetching recipe ${recipe} (${recipeType}, interval: ${interval}, pageSize: ${pageSize})`);
+      const result = await fetchSimklRecipeItems(recipe, recipeType, interval, page, pageSize, catalogConfig?.cacheTTL);
+      const items = (result.items as any[]).filter((it: any) => {
+        const ids = it.ids || {};
+        return !!(ids.imdb || ids.tmdb || ids.tvdb || ids.mal || ids.anilist || ids.kitsu || ids.anidb || ids.simkl || ids.simkl_id);
       });
       response = { items, hasMore: result.hasMore, totalItems: result.totalItems };
     } else if (catalogId === 'simkl.dvd.movies') {
@@ -2558,7 +3032,8 @@ async function getSimklCatalog(
       || catalogId.startsWith('simkl.watchlist.anime.')
       || catalogId === 'simkl.calendar'
       || catalogId === 'simkl.calendar.anime'
-      || catalogId.startsWith('simkl.discover.anime.');
+      || catalogId.startsWith('simkl.discover.anime.')
+      || (catalogId.startsWith('simkl.recipe.') && catalogId.endsWith('.anime'));
     const parseStart = Date.now();
     let metas = await parseSimklItems(response.items, type as 'movie' | 'series', config, userUUID, includeVideos, isAnimeCatalog);
     const parseTime = Date.now() - parseStart;
@@ -2598,13 +3073,14 @@ async function getFlixPatrolCatalog(
     const service = parts[1];
     const countryCode = parts[2];
     const mediaType = parts[3]; // 'movie', 'series', or 'all'
+    const variantId = parts[4]; // optional language/qualifier variant, e.g. 'hi'
 
     const catalogConfig = config.catalogs?.find((c: any) => c.id === catalogId);
     const countrySlug = catalogConfig?.metadata?.countrySlug || countryCode;
 
-    logger.info(`[FlixPatrol] Fetching top 10: service=${service}, country=${countrySlug}, type=${mediaType}`);
+    logger.info(`[FlixPatrol] Fetching top 10: service=${service}, country=${countrySlug}, type=${mediaType}${variantId ? `, variant=${variantId}` : ''}`);
 
-    let metas = await getFlixPatrolMetas(service, countrySlug, mediaType, language, config, includeVideos);
+    let metas = await getFlixPatrolMetas(service, countrySlug, mediaType, language, config, includeVideos, variantId);
 
     logger.success(`[FlixPatrol] Processed ${metas.length} items for catalog ${catalogId}`);
     return metas;
@@ -2667,6 +3143,380 @@ async function getPublicMetaDBCatalog(
     logger.error(`[PublicMetaDB] Error processing catalog ${catalogId}: ${err.message}`);
     return [];
   }
+}
+
+function buildCatalogCacheArgs(
+  catalogId: string,
+  catalogType: string,
+  page: number,
+  genre: string | null,
+  config: UserConfig
+): Record<string, any> {
+  const args: Record<string, any> = {};
+  if (page > 1) args.page = page;
+  if (genre) args.genre = genre;
+
+  const catCfg = (config.catalogs as any[])?.find((c: any) => c.id === catalogId && c.type === catalogType);
+
+  if (catalogId.startsWith('trakt.') || catalogId.startsWith('anilist.') || catalogId.startsWith('streaming.') || catalogId.startsWith('tmdb.year') || catalogId.startsWith('tmdb.language')) {
+    if (catCfg?.sort) args.sort = catCfg.sort;
+    if (catCfg?.sortDirection) args.sortDirection = catCfg.sortDirection;
+  } else if (catalogId.startsWith('mdblist.')) {
+    if (catCfg?.sort) args.sort = catCfg.sort;
+    if (catCfg?.order) args.order = catCfg.order;
+    if (supportsMdblistScoreFilters(catCfg)) {
+      if (typeof catCfg.filter_score_min === 'number') args.filter_score_min = catCfg.filter_score_min;
+      if (typeof catCfg.filter_score_max === 'number') args.filter_score_max = catCfg.filter_score_max;
+    }
+  } else if (catalogId.startsWith('tmdb.discover.') || catalogId.startsWith('tvdb.discover.') || catalogId.startsWith('simkl.discover.') || catalogId.startsWith('anilist.discover.') || catalogId.startsWith('mal.discover.')) {
+    const discoverParams = catCfg?.metadata?.discover?.params || catCfg?.metadata?.discoverParams || null;
+    if (discoverParams && typeof discoverParams === 'object') {
+      const resolved = catalogId.startsWith('tmdb.discover.')
+        ? resolveDynamicTmdbDiscoverParams(discoverParams, { timezone: (config as any).timezone })
+        : discoverParams;
+      args.discoverSig = crypto.createHash('md5').update(stableStringify(resolved)).digest('hex').substring(0, 8);
+    }
+  }
+
+  if (catalogId === 'trakt.calendar' || catalogId.startsWith('simkl.calendar')) {
+    const tz = (config as any).timezone || process.env.TZ || 'UTC';
+    const fmt = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
+    args.date = fmt.format(new Date());
+    args.days = typeof catCfg?.metadata?.airingSoonDays === 'number' ? catCfg.metadata.airingSoonDays : 1;
+  }
+
+  if (catalogId === 'tvmaze.schedule') {
+    const tz = (config as any).timezone || process.env.TZ || 'UTC';
+    const fmt = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
+    args.date = fmt.format(new Date());
+    args.genre = !args.genre || args.genre === 'None' ? '' : args.genre.toUpperCase();
+  }
+
+  return args;
+}
+
+async function getMergedCatalog(
+  type: string,
+  catalogId: string,
+  genre: string,
+  page: number,
+  language: string,
+  config: UserConfig,
+  userUUID: string,
+  includeVideos: boolean = false,
+  skip?: number
+): Promise<any[]> {
+  const catalogConfig = config.catalogs?.find((c: any) => c.id === catalogId);
+  if (!catalogConfig) {
+    logger.warn(`[Merged] Catalog config not found for ${catalogId}`);
+    return [];
+  }
+  const sources = (catalogConfig as any).metadata?.mergedSources;
+  if (!sources || sources.length === 0) {
+    logger.warn(`[Merged] No sources defined for ${catalogId}`);
+    return [];
+  }
+  const mergeMode: string = (catalogConfig as any).metadata?.mergeMode || 'interleaved';
+
+  const validSources = sources.filter((s: any) => {
+    if (s.catalogId.startsWith('merged.')) {
+      logger.warn(`[Merged] Skipping nested merge reference: ${s.catalogId}`);
+      return false;
+    }
+    const stillExists = config.catalogs?.some((c: any) =>
+      c.id === s.catalogId && c.type === s.catalogType
+    );
+    if (!stillExists) {
+      logger.warn(`[Merged] Source ${s.catalogId} (${s.catalogType}) no longer exists in config`);
+      return false;
+    }
+    return true;
+  });
+  if (validSources.length === 0) return [];
+
+  const { applyCatalogFilters } = require('../utils/catalogFilters.js');
+  const pageSize = parseInt(process.env.CATALOG_LIST_ITEMS_SIZE as string) || 20;
+  const stremioSkip = skip ?? (page - 1) * pageSize;
+  const hasGenreFilter = !!(genre && genre !== 'None' && normalizeGenreKey(genre));
+  const catalogTTL = parseInt(process.env.CATALOG_TTL || String(24 * 60 * 60), 10);
+
+  const cursorKey = redis ? `merged-cursor:${userUUID}:${catalogId}:${genre || 'all'}` : null;
+
+  interface MergedCursor {
+    served: number;
+    perSource: { catalogId: string; catalogType: string; nextPage: number }[];
+    seenIds: string[];
+    activeSourceIdx?: number;
+  }
+
+  let cursor: MergedCursor | null = null;
+  let perSourcePage: Map<string, number>;
+  let activeSourceIdx = 0;
+
+  if (stremioSkip === 0) {
+    if (cursorKey) await redis!.del(cursorKey);
+    perSourcePage = new Map(validSources.map((s: any) => [`${s.catalogId}:${s.catalogType}`, 1]));
+  } else if (cursorKey) {
+    const raw = await redis!.get(cursorKey);
+    if (raw) {
+      cursor = JSON.parse(raw);
+      perSourcePage = new Map(
+        cursor!.perSource.map((s) => [`${s.catalogId}:${s.catalogType}`, s.nextPage])
+      );
+      activeSourceIdx = cursor!.activeSourceIdx ?? 0;
+    } else {
+      perSourcePage = new Map(validSources.map((s: any) => [`${s.catalogId}:${s.catalogType}`, 1]));
+    }
+  } else {
+    perSourcePage = new Map(validSources.map((s: any) => [`${s.catalogId}:${s.catalogType}`, 1]));
+  }
+
+  const seenIds = new Set<string>(cursor?.seenIds || []);
+
+  const resolveDefaultGenre = async (srcId: string, srcType: string): Promise<string | null> => {
+    const srcCfg = (config.catalogs as any[])?.find((c: any) => c.id === srcId && c.type === srcType);
+    if (!srcCfg || srcCfg.showInHome !== false) return null;
+
+    if (srcId === 'tmdb.trending') return 'Day';
+    if (srcId === 'mal.schedule') return 'Monday';
+    if (srcId === 'mal.seasons') {
+      const seasons = ['Winter', 'Spring', 'Summer', 'Fall'];
+      const d = new Date();
+      const m = d.getMonth();
+      const idx = m <= 2 ? 0 : m <= 5 ? 1 : m <= 8 ? 2 : 3;
+      return `${seasons[idx]} ${d.getFullYear()}`;
+    }
+    if (srcId === 'tvdb.genres' || srcId === 'tvdb.trending') {
+      try {
+        const genres = await getGenreList('tvdb', language, srcType as 'movie' | 'series', config);
+        const names = genres.map((g: any) => g.name).sort();
+        if (names.length > 0) return names[0];
+      } catch {}
+    }
+    if (srcId === 'mal.studios') {
+      try {
+        const studios = await cacheWrapJikanApi('mal-studios', async () => await jikan.getStudios(100), 30 * 24 * 60 * 60);
+        const names = studios.map((s: any) => { const t = s.titles.find((x: any) => x.type === 'Default'); return t?.title; }).filter(Boolean);
+        if (names.length > 0) return names[0];
+      } catch {}
+    }
+    if (srcId === 'mal.genres') {
+      try {
+        const animeGenres = await cacheWrapJikanApi('anime-genres', async () => await jikan.getAnimeGenres(), 30 * 24 * 60 * 60);
+        const names = animeGenres.filter(Boolean).map((g: any) => g.name).sort();
+        if (names.length > 0) return names[0];
+      } catch {}
+    }
+    return 'None';
+  };
+
+  const fetchSourcePage = async (src: any, srcPage: number): Promise<{ items: any[]; rawLength: number }> => {
+    try {
+      const effectiveGenre = genre || await resolveDefaultGenre(src.catalogId, src.catalogType) || '';
+      const cacheArgs = buildCatalogCacheArgs(src.catalogId, src.catalogType, srcPage, effectiveGenre, config);
+      const catalogKey = `${src.catalogId}:${src.catalogType}:${stableStringify(cacheArgs)}`;
+
+      const result = await cacheWrapCatalog(userUUID, catalogKey, async () => {
+        return await getCatalog(
+          src.catalogType, language, srcPage, src.catalogId, effectiveGenre, config, userUUID, includeVideos
+        );
+      }, { config });
+
+      const raw = result?.metas || [];
+      let items = raw;
+
+      if (hasGenreFilter) {
+        items = filterMetasByGenre(items, genre);
+        if (items.length !== raw.length) {
+          logger.debug(
+            `[Merged] ${src.catalogId}: genre="${genre}" dropped ${raw.length - items.length}/${raw.length} metas`
+          );
+        }
+      }
+
+      items = await applyCatalogFilters(items, { type, config, catalogConfig, cleanId: catalogId });
+
+      return { items, rawLength: raw.length };
+    } catch (err: any) {
+      logger.warn(`[Merged] Source ${src.catalogId} failed: ${err.message}`);
+      return { items: [], rawLength: 0 };
+    }
+  };
+
+  const collectDeduped = (metas: any[], collected: any[]): { added: number; consumed: number } => {
+    let added = 0;
+    let consumed = 0;
+    for (const meta of metas) {
+      if (collected.length >= pageSize) break;
+      consumed++;
+      const key = mergedDedupKey(meta);
+      if (key && seenIds.has(key)) continue;
+      if (key) seenIds.add(key);
+      collected.push(meta);
+      added++;
+    }
+    return { added, consumed };
+  };
+
+  const collectDedupedTagged = (
+    tagged: Array<{ meta: any; srcIdx: number }>,
+    collected: any[]
+  ): { added: number; consumedPerSource: number[] } => {
+    let added = 0;
+    const consumedPerSource = new Array(validSources.length).fill(0);
+    for (const { meta, srcIdx } of tagged) {
+      if (collected.length >= pageSize) break;
+      const key = mergedDedupKey(meta);
+      if (key && seenIds.has(key)) { consumedPerSource[srcIdx]++; continue; }
+      if (key) seenIds.add(key);
+      collected.push(meta);
+      consumedPerSource[srcIdx]++;
+      added++;
+    }
+    return { added, consumedPerSource };
+  };
+
+  const markSourcePage = (src: any, resultLength: number): boolean => {
+    const key = `${src.catalogId}:${src.catalogType}`;
+    const srcPage = perSourcePage.get(key)!;
+    if (resultLength === 0) {
+      perSourcePage.set(key, -1);
+      return true;
+    }
+    perSourcePage.set(key, srcPage + 1);
+    return false;
+  };
+
+  const collected: any[] = [];
+  const maxAttempts = 15;
+  let attempts = 0;
+
+  if (mergeMode === 'sequential') {
+    while (collected.length < pageSize && activeSourceIdx < validSources.length && attempts < maxAttempts) {
+      attempts++;
+      const src = validSources[activeSourceIdx];
+      const key = `${src.catalogId}:${src.catalogType}`;
+      const srcPage = perSourcePage.get(key)!;
+
+      if (srcPage <= 0) {
+        activeSourceIdx++;
+        attempts--;
+        continue;
+      }
+
+      const { items, rawLength } = await fetchSourcePage(src, srcPage);
+      const { added, consumed } = collectDeduped(items, collected);
+      if (consumed >= items.length) {
+        if (rawLength === 0 || (items.length > 0 && added === 0)) {
+          markSourcePage(src, 0);
+          activeSourceIdx++;
+        } else {
+          const exhausted = markSourcePage(src, rawLength);
+          if (exhausted) activeSourceIdx++;
+        }
+      }
+    }
+  } else if (mergeMode === 'alternating') {
+    const liveCount = validSources.filter((_: any, i: number) => {
+      const k = `${validSources[i].catalogId}:${validSources[i].catalogType}`;
+      return perSourcePage.get(k)! > 0;
+    }).length;
+    let exhaustedCount = validSources.length - liveCount;
+    let consecutiveSkips = 0;
+
+    while (collected.length < pageSize && exhaustedCount < validSources.length && attempts < maxAttempts) {
+      attempts++;
+      const srcIdx = activeSourceIdx % validSources.length;
+      const src = validSources[srcIdx];
+      const key = `${src.catalogId}:${src.catalogType}`;
+      const srcPage = perSourcePage.get(key)!;
+
+      if (srcPage <= 0) {
+        activeSourceIdx++;
+        consecutiveSkips++;
+        if (consecutiveSkips >= validSources.length) break;
+        attempts--;
+        continue;
+      }
+      consecutiveSkips = 0;
+
+      const { items, rawLength } = await fetchSourcePage(src, srcPage);
+      const { added, consumed } = collectDeduped(items, collected);
+      if (consumed >= items.length) {
+        if (rawLength === 0 || (items.length > 0 && added === 0)) {
+          markSourcePage(src, 0);
+          exhaustedCount++;
+        } else {
+          const exhausted = markSourcePage(src, rawLength);
+          if (exhausted) exhaustedCount++;
+        }
+      }
+      activeSourceIdx++;
+    }
+  } else {
+    let exhaustedCount = [...perSourcePage.values()].filter(p => p <= 0).length;
+
+    while (collected.length < pageSize && exhaustedCount < validSources.length && attempts < maxAttempts) {
+      attempts++;
+
+      const results = await Promise.all(
+        validSources.map(async (src: any) => {
+          const key = `${src.catalogId}:${src.catalogType}`;
+          const srcPage = perSourcePage.get(key)!;
+          if (srcPage <= 0) return { items: [], rawLength: 0 };
+          return fetchSourcePage(src, srcPage);
+        })
+      );
+
+      const tagged = roundRobinInterleaveTagged(results.map(r => r.items));
+      const { added, consumedPerSource } = collectDedupedTagged(
+        tagged.map(t => ({ meta: t.item, srcIdx: t.srcIdx })),
+        collected
+      );
+
+      for (let i = 0; i < validSources.length; i++) {
+        const key = `${validSources[i].catalogId}:${validSources[i].catalogType}`;
+        if (perSourcePage.get(key)! <= 0) continue;
+        if (results[i].rawLength === 0) {
+          if (markSourcePage(validSources[i], 0)) exhaustedCount++;
+        } else if (consumedPerSource[i] >= results[i].items.length) {
+          if (markSourcePage(validSources[i], results[i].rawLength)) exhaustedCount++;
+        }
+      }
+
+      if (added === 0 && results.some(r => r.items.length > 0)) {
+        for (let i = 0; i < validSources.length; i++) {
+          const key = `${validSources[i].catalogId}:${validSources[i].catalogType}`;
+          if (perSourcePage.get(key)! > 0 && results[i].items.length > 0) {
+            markSourcePage(validSources[i], 0);
+            exhaustedCount++;
+          }
+        }
+        break;
+      }
+    }
+  }
+
+  if (cursorKey) {
+    const newCursor: MergedCursor = {
+      served: stremioSkip + collected.length,
+      perSource: validSources.map((s: any) => ({
+        catalogId: s.catalogId,
+        catalogType: s.catalogType,
+        nextPage: perSourcePage.get(`${s.catalogId}:${s.catalogType}`) || -1,
+      })),
+      seenIds: [...seenIds],
+      activeSourceIdx,
+    };
+    await redis!.set(cursorKey, JSON.stringify(newCursor), 'EX', catalogTTL);
+  }
+
+  logger.success(
+    `[Merged] ${catalogId}: ${collected.length} items from ${validSources.length} sources ` +
+    `(skip=${stremioSkip}, seen=${seenIds.size}, mode=${mergeMode}` +
+    `${hasGenreFilter ? `, genre="${genre}"` : ''})`
+  );
+  return collected;
 }
 
 export { getCatalog };

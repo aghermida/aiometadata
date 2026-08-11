@@ -10,6 +10,7 @@ const jikan = require('../lib/mal');
 const { resolveAllIds } = require('../lib/id-resolver');
 const idMapper = require('../lib/id-mapper');
 const { selectFanartImageByLang } = require('./fanart');
+const { tmdbImageUrl, tmdbLogoSize, tmdbBackdropSize, tmdbLandscapeSize, tmdbPosterSize } = require('./tmdbImageSize');
 const { getImdbRating } = require('../lib/getImdbRating');
 const consola = require('consola');
 const { cacheWrapMetaSmart, cacheWrapGlobal } = require('../lib/getCache');
@@ -122,6 +123,10 @@ function resolvePattern(pattern, ids, type, config, extra) {
 
   let url = pattern;
   for (const [placeholder, value] of Object.entries(placeholders)) {
+    const optional = `${placeholder.slice(0, -1)}?}`;
+    if (url.includes(optional)) {
+      url = url.split(optional).join(value);
+    }
     if (url.includes(placeholder)) {
       if (!value) return null; // Referenced placeholder has no value — fall back
       url = url.split(placeholder).join(value);
@@ -214,10 +219,35 @@ function getDefaultThumbnailPattern(provider) {
 }
 
 /**
+ * Resolve the poster pattern for a config: the user's custom pattern, otherwise the
+ * selected provider's default. Returns null when the provider is 'none'.
+ */
+function resolvePosterPattern(config) {
+  const provider = config?.posterRatingProvider;
+  if (provider === 'none') return null;
+  return config?.customPosterUrlPattern
+    || (provider && provider !== 'custom' ? getDefaultPosterPattern(provider) : null);
+}
+
+/**
+ * Episode thumbnail equivalent of resolvePosterPattern.
+ */
+function resolveThumbnailPattern(config) {
+  const provider = config?.posterRatingProvider;
+  if (provider === 'none') return null;
+  return config?.customThumbnailUrlPattern
+    || (provider && provider !== 'custom' ? getDefaultThumbnailPattern(provider) : null);
+}
+
+/**
  * Get poster URL from the selected rating provider (RPDB or Top Poster)
  */
 function getRatingPosterUrl(type, ids, language, config, fallbackUrl = null) {
-  const provider = config.posterRatingProvider || 'rpdb';
+  const provider = config.posterRatingProvider || 'none';
+
+  if (provider === 'none') {
+    return null;
+  }
 
   if (provider === 'custom') {
     return null; // Custom uses URL patterns, not rating poster APIs
@@ -236,10 +266,33 @@ function getRatingPosterUrl(type, ids, language, config, fallbackUrl = null) {
 }
 
 /**
+ * Rebuilds the provider URL that `/poster-cache/proxy/poster/:type/:id` fetches,
+ * from the single id the route carries. The warmer needs the same URL to know
+ * whether that poster is already cached, so both callers share this.
+ */
+function resolveProxyRatingPosterUrl(type, proxyId, language, key, fallbackUrl = null) {
+  if (!proxyId || !key) return null;
+  const [idSource, idValue] = proxyId.startsWith('tt') ? ['imdb', proxyId] : proxyId.split(':');
+  const ids = {
+    tmdbId: idSource === 'tmdb' ? idValue : null,
+    tvdbId: idSource === 'tvdb' ? idValue : null,
+    imdbId: idSource === 'imdb' ? idValue : null,
+  };
+  if (key.startsWith('TP-')) {
+    return getRatingPosterUrl(type, ids, language, { apiKeys: { topPoster: key }, posterRatingProvider: 'top' }, fallbackUrl);
+  }
+  return getRpdbPoster(type, ids, language, key);
+}
+
+/**
  * Get the API key for the selected poster rating provider
  */
 function getPosterRatingApiKey(config) {
-  const provider = config.posterRatingProvider || 'rpdb'; // Default to RPDB for backward compatibility
+  const provider = config.posterRatingProvider || 'none';
+
+  if (provider === 'none') {
+    return null;
+  }
 
   if (provider === 'custom') {
     return null; // Custom uses URL patterns, not rating poster APIs
@@ -261,7 +314,7 @@ function getPosterRatingApiKey(config) {
  * Top Poster API returns proper codes that Stremio can handle.
  */
 function buildPosterProxyUrl(host, type, proxyId, fallback, language, config) {
-  const provider = config.posterRatingProvider || 'rpdb'; // Default to RPDB for backward compatibility
+  const provider = config.posterRatingProvider || 'none';
   const apiKey = getPosterRatingApiKey(config);
   
   if (!apiKey || !isPosterRatingEnabled(config)) {
@@ -628,9 +681,9 @@ function parseMedia(el, type, genreList = [], config = {}) {
     name: name,
     genres: genres,
     poster: el.poster_path ? `https://image.tmdb.org/t/p/w500${el.poster_path}` : null,
-    background: el.backdrop_path ? `https://image.tmdb.org/t/p/original${el.backdrop_path}` : null,
+    background: el.backdrop_path ? tmdbImageUrl(tmdbBackdropSize(), el.backdrop_path) : null,
     posterShape: "regular",
-    imdbRating: el.vote_average ? el.vote_average.toFixed(1) : 'N/A',
+    imdbRating: 'N/A',
     year: type === 'movie' ? (el.release_date?.substring(0, 4) || '') : (el.first_air_date?.substring(0, 4) || ''),
     type: type === 'movie' ? type : 'series',
     released: type === 'movie' ? new Date(el.release_date) : new Date(el.first_air_date),
@@ -1711,7 +1764,11 @@ async function getAnimeLogo({ malId, imdbId, tvdbId, tmdbId, mediaType = 'series
 
   if (artProvider === 'imdb' && imdbId) {
     try {
-      return imdb.getLogoFromImdb(imdbId);
+      // Only serve a metahub logo we know exists, so anime titles without one
+      // fall through to the next provider instead of getting a 404 URL.
+      if (await imdb.metahubImageExists(imdbId, 'logo')) {
+        return imdb.getLogoFromImdb(imdbId);
+      }
     } catch (error) {
       logger.warn(`[getAnimeLogo] IMDB logo fetch failed for MAL ID ${malId}:`, error.message);
     }
@@ -2053,6 +2110,11 @@ async function parseAnimeCatalogMeta(anime, config, language, descriptionFallbac
     description: descriptionFallback || addMetaProviderAttribution(anime.synopsis, 'MAL', config),
     year: anime.year,
     imdb_id: mapping?.imdb_id,
+    ...(tmdbId ? { _tmdbId: String(tmdbId) } : {}),
+    ...(mapping?.tvdb_id ? { _tvdbId: String(mapping.tvdb_id) } : {}),
+    ...(imdbId ? { _imdbId: imdbId } : {}),
+    ...(kitsuId ? { _kitsuId: String(kitsuId) } : {}),
+    ...(malId ? { _malId: String(malId) } : {}),
     releaseInfo: anime.year,
     imdbRating: imdbRating,
     runtime: parseRunTime(anime.duration),
@@ -2223,7 +2285,7 @@ async function parseAnimeCatalogMetaBatch(animes, config, language, includeVideo
         let genres = getKitsuGenresForItem(item, kitsuData?.included, kitsuItems.length <= 1);
         
         let releaseDates = null;
-        if (config.hideUnreleasedDigital && stremioType === 'movie' && tmdbId) {
+        if (stremioType === 'movie' && tmdbId) {
           try {
             releaseDates = await tmdb.getMovieCertifications({ id: tmdbId }, config);
           } catch (error) {
@@ -2240,12 +2302,18 @@ async function parseAnimeCatalogMetaBatch(animes, config, language, includeVideo
           description: addMetaProviderAttribution(item.attributes.synopsis, 'KITSU', config),
           year: item.attributes.startDate ? item.attributes.startDate.substring(0, 4) : null,
           imdb_id: imdbId,
+          ...(tmdbId ? { _tmdbId: String(tmdbId) } : {}),
+          ...(tvdbId ? { _tvdbId: String(tvdbId) } : {}),
+          ...(imdbId ? { _imdbId: imdbId } : {}),
+          ...(mapping?.kitsu_id ? { _kitsuId: String(mapping.kitsu_id) } : {}),
+          ...(id ? { _malId: String(id) } : {}),
           genres: genres,
           releaseInfo: kitsuReleaseInfo,
           runtime: parseRunTime(item.attributes.episodeLength),
           certification: item.attributes.ageRating,
           imdbRating: mapping?.imdb_id ? await getImdbRating(mapping?.imdb_id, stremioType) : 'N/A',
           released: item.attributes.startDate ? new Date(item.attributes.startDate) : undefined,
+          status: item.attributes.status,
           trailers: item.attributes.youtubeVideoId ? [{
             source: item.attributes.youtubeVideoId,
             type: "Trailer"
@@ -2376,9 +2444,8 @@ async function parseAnimeCatalogMetaBatch(animes, config, language, includeVideo
           }
         }
       }
-      // Only fetch TMDB release dates if digital release filter is enabled and it's a movie with TMDB ID
       let releaseDates = null;
-      const shouldFetchReleaseDates = config.hideUnreleasedDigital && stremioType === 'movie' && tmdbId;
+      const shouldFetchReleaseDates = stremioType === 'movie' && tmdbId;
       
       const [logo, background, releaseDatesResult] = await Promise.all([
         getAnimeLogo({malId, imdbId, tvdbId, tmdbId, mediaType: stremioType}, config),
@@ -2391,21 +2458,28 @@ async function parseAnimeCatalogMetaBatch(animes, config, language, includeVideo
       if (releaseDatesResult) {
         releaseDates = releaseDatesResult;
       }
-      
+
       const meta = {
         id: `mal:${malId}`,
         type: stremioType,
         logo: logo,
         background: background,
         name: anime.title_english || anime.title,
+        genres: anime.genres?.map(g => g.name) || [],
         poster: finalPosterUrl,
         description: addMetaProviderAttribution(anime.synopsis, 'MAL', config),
         year: anime.year,
         imdb_id: imdbId,
+        ...(tmdbId ? { _tmdbId: String(tmdbId) } : {}),
+        ...(tvdbId ? { _tvdbId: String(tvdbId) } : {}),
+        ...(imdbId ? { _imdbId: imdbId } : {}),
+        ...(mapping?.kitsu_id ? { _kitsuId: String(mapping.kitsu_id) } : {}),
+        ...(malId ? { _malId: String(malId) } : {}),
         releaseInfo: malReleaseInfo,
         runtime: parseRunTime(anime.duration),
         imdbRating: imdbRating,
         released: anime.aired?.from ? new Date(anime.aired.from) : undefined,
+        status: anime.status,
         trailers: trailers
       };
 
@@ -2512,7 +2586,7 @@ async function getTmdbMovieArtBatch(tmdbId, config, isLandscape = false, origina
 
       const posterImg = selectTmdbImageByLang(res.posters, config, 'iso_639_1', originalLanguage);
       const poster = posterImg?.file_path
-        ? `https://image.tmdb.org/t/p/w600_and_h900_bestv2${posterImg.file_path}`
+        ? tmdbImageUrl(tmdbPosterSize(), posterImg.file_path)
         : null;
       let backgroundImg;
       if (isLandscape) {
@@ -2525,12 +2599,12 @@ async function getTmdbMovieArtBatch(tmdbId, config, isLandscape = false, origina
       || res.backdrops?.[0];
       }
       const background = backgroundImg?.file_path
-        ? `https://image.tmdb.org/t/p/original${backgroundImg.file_path}`
+        ? tmdbImageUrl(isLandscape ? tmdbLandscapeSize(backgroundImg.width) : tmdbBackdropSize(backgroundImg.width), backgroundImg.file_path)
         : null;
 
       const logoImg = selectTmdbImageByLang(res.logos, config, 'iso_639_1', originalLanguage);
       const logo = logoImg?.file_path
-        ? `https://image.tmdb.org/t/p/original${logoImg.file_path}`
+        ? tmdbImageUrl(tmdbLogoSize(logoImg.width), logoImg.file_path)
         : null;
 
       return { poster, background, logo };
@@ -2547,6 +2621,40 @@ async function getTmdbMovieArtBatch(tmdbId, config, isLandscape = false, origina
   tmdbMovieImagesInflight.set(cacheKey, fetchPromise);
   
   return fetchPromise;
+}
+
+const TMDB_IMAGE_KINDS = ['posters', 'backdrops', 'logos'];
+
+/**
+ * Refill image kinds the meta call came back empty on, from a second request scoped to
+ * the title's original language. Meta calls can't request it up front since they learn
+ * it from their own response. Skipped under englishArtOnly, which keeps falling through
+ * to the next provider instead.
+ */
+async function mergeTmdbOriginalLanguageImages(mediaType, tmdbId, images, originalLanguage, langCode, config) {
+  if (!tmdbId || !originalLanguage) return images;
+  if (config?.artProviders?.englishArtOnly) return images;
+  if (originalLanguage === 'en' || originalLanguage === langCode) return images;
+
+  const missing = TMDB_IMAGE_KINDS.filter(kind => !images?.[kind]?.length);
+  if (missing.length === 0) return images;
+
+  try {
+    const params = { id: tmdbId, include_image_language: originalLanguage };
+    const extra = mediaType === 'movie'
+      ? await tmdb.movieImages(params, config)
+      : await tmdb.tvImages(params, config);
+    if (!extra) return images;
+
+    const merged = { ...(images || {}) };
+    for (const kind of missing) {
+      if (extra[kind]?.length) merged[kind] = extra[kind];
+    }
+    return merged;
+  } catch (error) {
+    logger.warn(`[mergeTmdbOriginalLanguageImages] Failed to fetch ${originalLanguage} images for ${mediaType} ${tmdbId}:`, error.message);
+    return images;
+  }
 }
 
 /**
@@ -2642,7 +2750,7 @@ async function getMoviePoster({ tmdbId, tvdbId, imdbId, metaProvider, fallbackPo
 /**
  * Get movie background with art provider preference
  */
-async function getMovieBackground({ tmdbId, tvdbId, imdbId, metaProvider, fallbackBackgroundUrl, originalLanguage }, config) {
+async function getMovieBackground({ tmdbId, tvdbId, imdbId, metaProvider, fallbackBackgroundUrl, originalLanguage }, config, isLandscape = false) {
   const artProvider = resolveArtProvider('movie', 'background', config);
   
   if (artProvider === 'tvdb' && metaProvider != 'tvdb') {
@@ -2697,7 +2805,7 @@ async function getMovieBackground({ tmdbId, tvdbId, imdbId, metaProvider, fallba
   if (artProvider === 'tmdb' && metaProvider != 'tmdb') {
     try {
       if(tmdbId) {
-        const batchArt = await getTmdbMovieArtBatch(tmdbId, config, false, originalLanguage);
+        const batchArt = await getTmdbMovieArtBatch(tmdbId, config, isLandscape, originalLanguage);
         if (batchArt.background) {
           return batchArt.background;
         }
@@ -2706,7 +2814,7 @@ async function getMovieBackground({ tmdbId, tvdbId, imdbId, metaProvider, fallba
         if(!tvdbId) return fallbackBackgroundUrl;
         const mappedIds = await resolveAllIds(`tvdb:${tvdbId}`, 'movie', config);
         if(mappedIds.tmdbId) {
-          const batchArt = await getTmdbMovieArtBatch(mappedIds.tmdbId, config, false, originalLanguage);
+          const batchArt = await getTmdbMovieArtBatch(mappedIds.tmdbId, config, isLandscape, originalLanguage);
           if (batchArt.background) {
             return batchArt.background;
           }
@@ -2801,16 +2909,23 @@ async function getMovieLogo({ tmdbId, tvdbId, imdbId, metaProvider, fallbackLogo
     }
   }
   else if (artProvider === 'imdb' && metaProvider != 'imdb') {
+    // Same guard as the fallback below: only serve a metahub logo we know exists.
     if(imdbId) {
-      return imdb.getLogoFromImdb(imdbId);
+      if (await imdb.metahubImageExists(imdbId, 'logo')) {
+        return imdb.getLogoFromImdb(imdbId);
+      }
     } else if(tvdbId) {
       const mappedIds = await resolveAllIds(`tvdb:${tvdbId}`, 'movie', config);
-      if(mappedIds.imdbId) {
+      if(mappedIds.imdbId && await imdb.metahubImageExists(mappedIds.imdbId, 'logo')) {
         return imdb.getLogoFromImdb(mappedIds.imdbId);
       }
     }
   }
-  
+
+  if (fallbackLogoUrl == null && imdbId && metaProvider != 'imdb' && await imdb.metahubImageExists(imdbId, 'logo')) {
+    return imdb.getLogoFromImdb(imdbId);
+  }
+
   return fallbackLogoUrl;
 }
 
@@ -2851,7 +2966,7 @@ async function getTmdbSeriesArtBatch(tmdbId, config, isLandscape = false, origin
 
       const posterImg = selectTmdbImageByLang(res.posters, config, 'iso_639_1', originalLanguage);
       const poster = posterImg?.file_path
-        ? `https://image.tmdb.org/t/p/w600_and_h900_bestv2${posterImg.file_path}`
+        ? tmdbImageUrl(tmdbPosterSize(), posterImg.file_path)
         : null;
 
       let backgroundImg;
@@ -2865,12 +2980,12 @@ async function getTmdbSeriesArtBatch(tmdbId, config, isLandscape = false, origin
         || res.backdrops?.[0];
       }
       const background = backgroundImg?.file_path
-        ? `https://image.tmdb.org/t/p/original${backgroundImg.file_path}`
+        ? tmdbImageUrl(isLandscape ? tmdbLandscapeSize(backgroundImg.width) : tmdbBackdropSize(backgroundImg.width), backgroundImg.file_path)
         : null;
 
       const logoImg = selectTmdbImageByLang(res.logos, config, 'iso_639_1', originalLanguage);
       const logo = logoImg?.file_path
-        ? `https://image.tmdb.org/t/p/original${logoImg.file_path}`
+        ? tmdbImageUrl(tmdbLogoSize(logoImg.width), logoImg.file_path)
         : null;
 
       return { poster, background, logo };
@@ -3137,107 +3252,23 @@ async function getSeriesLogo({ tmdbId, tvdbId, imdbId, metaProvider, fallbackLog
     }
   }
   else if ((artProvider === 'imdb' || fallbackLogoUrl === null) && metaProvider != 'imdb') {
-    if(imdbId) {
+    // Must verify existence here too: this branch's condition is a superset of the
+    // check below, so returning unconditionally would shadow it and serve a URL
+    // that 404s whenever metahub has no logo for the title.
+    if(imdbId && await imdb.metahubImageExists(imdbId, 'logo')) {
       return imdb.getLogoFromImdb(imdbId);
     }
   }
+
+  if (fallbackLogoUrl == null && imdbId && metaProvider != 'imdb' && await imdb.metahubImageExists(imdbId, 'logo')) {
+    return imdb.getLogoFromImdb(imdbId);
+  }
+
   return fallbackLogoUrl;
 
 }
 
-/**
- * Convert banner image to background image using the image processing API
- * @param {string} bannerUrl - Original banner image URL
- * @param {Object} options - Processing options
- * @param {number} options.width - Target width (default: 1920)
- * @param {number} options.height - Target height (default: 1080)
- * @param {number} options.blur - Blur amount (default: 0)
- * @param {number} options.brightness - Brightness adjustment (default: 1)
- * @param {number} options.contrast - Contrast adjustment (default: 1)
- * @returns {string} Processed background image URL
- */
-function convertBannerToBackgroundUrl(bannerUrl, options = {}) {
-  if (!bannerUrl) return null;
-  
-  const {
-    width = 1920,
-    height = 1080,
-    blur = 0,
-    brightness = 1,
-    contrast = 1
-  } = options;
 
-  const host = process.env.HOST_NAME.startsWith('http')
-    ? process.env.HOST_NAME
-    : `https://${process.env.HOST_NAME}`;
-
-  // Build the query parameters
-  const params = new URLSearchParams({
-    url: bannerUrl,
-    width: width.toString(),
-    height: height.toString(),
-    blur: blur.toString(),
-    brightness: brightness.toString(),
-    contrast: contrast.toString()
-  });
-
-  return `${host}/api/image/banner-to-background?${params.toString()}`;
-}
-
-/**
- * Smart background image processor that automatically converts banners to backgrounds
- * @param {string} imageUrl - Original image URL
- * @param {string} imageType - Type of image: 'banner', 'poster', 'background'
- * @param {Object} options - Processing options
- * @returns {string} Processed image URL
- */
-function processBackgroundImage(imageUrl, imageType = 'background', options = {}) {
-  if (!imageUrl) return null;
-
-  // If it's already a background image, return as is
-  if (imageType === 'background') {
-    return imageUrl;
-  }
-
-  // If it's a banner, convert to background
-  if (imageType === 'banner') {
-    return convertBannerToBackgroundUrl(imageUrl, {
-      blur: 2, // Slight blur for better text readability
-      brightness: 0.9, // Slightly darker
-      ...options
-    });
-  }
-
-  // If it's a poster, convert to background with more processing
-  if (imageType === 'poster') {
-    return convertBannerToBackgroundUrl(imageUrl, {
-      blur: 3, // More blur for posters
-      brightness: 0.8, // Darker for better contrast
-      ...options
-    });
-  }
-
-  return imageUrl;
-}
-
-/**
- * Convert AniList banner image to background image
- * @param {string} bannerUrl - AniList banner image URL
- * @param {Object} options - Processing options
- * @returns {string} Processed background image URL
- */
-function convertAnilistBannerToBackground(bannerUrl, options = {}) {
-  if (!bannerUrl) return null;
-  
-  return convertBannerToBackgroundUrl(bannerUrl, {
-    width: 1920,
-    height: 1080,
-    blur: 0.5, // Minimal blur to preserve image quality
-    brightness: 0.98, // Keep original brightness
-    contrast: 1.05, // Very slight contrast boost
-    ...options
-  });
-}
 
 // Helper for language fallback selection from TMDB images
 function selectTmdbImageByLang(images, config, key = 'iso_639_1', originalLanguage = null) {
@@ -3404,11 +3435,14 @@ module.exports = {
   getTopPosterPoster,
   getTopPosterThumbnail,
   getRatingPosterUrl,
+  resolveProxyRatingPosterUrl,
   getPosterRatingApiKey,
   buildPosterProxyUrl,
   isPosterRatingEnabled,
   getDefaultPosterPattern,
   getDefaultThumbnailPattern,
+  resolvePosterPattern,
+  resolveThumbnailPattern,
   parsePosterWithProvider,
   checkIfExists,
   sortSearchResults,
@@ -3432,8 +3466,7 @@ module.exports = {
   getSeriesLogo,
   getTmdbSeriesArtBatch,
   selectTmdbImageByLang,
-  processBackgroundImage,
-  convertAnilistBannerToBackground,
+  mergeTmdbOriginalLanguageImages,
   getTmdbMovieCertificationForCountry,
   getTmdbTvCertificationForCountry,
   resolveArtProvider,

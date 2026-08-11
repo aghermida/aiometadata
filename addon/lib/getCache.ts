@@ -1,4 +1,3 @@
-const buildInfo: any = require('./buildInfo');
 const redis: any = require('./redisClient');
 const { loadConfigFromDatabase }: any = require('./configApi');
 const consola: any = require('consola');
@@ -12,6 +11,10 @@ const {
   canonicalizeLinksForCache,
   applyLinksUserScopeProjection,
 }: any = require('./linkProjection');
+const {
+  applyImdbRatingProjection,
+  applyImdbRatingProjectionToList,
+}: any = require('./imdbRatingProjection');
 const {
   RELEASE_AVAILABILITY_FIELD,
   normalizeMetaReleaseAvailability,
@@ -37,7 +40,15 @@ function parsePositiveIntEnv(envValue: any, defaultValue: number, minValue: numb
 }
 
 
-const ADDON_VERSION = buildInfo.version;
+const { withEpoch, withGlobalEpoch }: any = require('./cacheEpoch');
+const {
+  isRefreshAheadEnabled,
+  isDueForRefresh,
+  mayReplaceOnRefresh,
+  runRefreshAhead,
+  getRefreshAheadStats,
+  resetRefreshAheadStats,
+}: any = require('./cacheRefreshAhead');
 
 function META_TTL() { return parseInt(process.env.META_TTL || String(7 * 24 * 60 * 60), 10); }
 function CATALOG_TTL() { return parseInt(process.env.CATALOG_TTL || String(1 * 24 * 60 * 60), 10); }
@@ -66,6 +77,9 @@ const cacheHealth: any = {
   errors: 0,
   cachedErrors: 0,
   corruptedEntries: 0,
+  coldStoreHits: 0,
+  coldStoreMisses: 0,
+  coldStoreComponents: 0,
   lastHealthCheck: Date.now(),
   errorCounts: {},
   keyAccessCounts: new Map(),
@@ -363,6 +377,18 @@ async function attemptSelfHealing(key: string, originalError: any): Promise<bool
   }
 }
 
+function contentTypeForKey(key: string): string {
+  if (key.startsWith('meta')) return 'meta';
+  if (key.startsWith('catalog')) return 'catalog';
+  if (key.startsWith('search')) return 'search';
+  if (key.startsWith('genre')) return 'genre';
+  return 'unknown';
+}
+
+function wasCachedAtNominalTtl(classifier: any, value: any, key: string): boolean {
+  return classifier(value, null, key).ttl === null;
+}
+
 function classifyResult(result: any, error: any = null, cacheKey: string | null = null): { type: string; ttl: number | null } {
   if (error) {
     const errorMessage = error.message?.toLowerCase() || '';
@@ -384,6 +410,10 @@ function classifyResult(result: any, error: any = null, cacheKey: string | null 
     return { type: 'EMPTY_RESULT', ttl: ERROR_TTL_STRATEGIES.EMPTY_RESULT };
   }
 
+  if ((result as any)?.meta?.__degradedFallback) {
+    return { type: 'DEGRADED_FALLBACK', ttl: 0 };
+  }
+
   const isExternalApi = cacheKey && (
     cacheKey.includes('tvdb-api:') ||
     cacheKey.includes('tmdb-api:') ||
@@ -401,7 +431,8 @@ function classifyResult(result: any, error: any = null, cacheKey: string | null 
     cacheKey.includes('mdblist_') ||
     cacheKey.includes('stremthru-') ||
     cacheKey.includes('cinemeta-') ||
-    cacheKey.includes('flixpatrol-')
+    cacheKey.includes('flixpatrol-') ||
+    cacheKey.includes('movielens-')
   );
 
   if (isExternalApi) {
@@ -441,13 +472,18 @@ function classifyResult(result: any, error: any = null, cacheKey: string | null 
   return { type: 'EMPTY_RESULT', ttl: ERROR_TTL_STRATEGIES.EMPTY_RESULT };
 }
 
+function classifyResultAllowEmpty(result: any, error: any = null, cacheKey: string | null = null): { type: string; ttl: number | null } {
+  const base = classifyResult(result, error, cacheKey);
+  return base.type === 'EMPTY_RESULT' ? { type: 'SUCCESS', ttl: null } : base;
+}
+
 async function cacheWrap(key: string, method: () => Promise<any>, ttl: number, options: any = {}): Promise<any> {
   if (!redis) {
     return method();
   }
 
-  const versionedKey = `v${ADDON_VERSION}:${key}`;
-  return singleFlight(versionedKey, () => cacheWrapInternal(key, method, ttl, options, versionedKey));
+  const epochKey = withEpoch(key);
+  return singleFlight(epochKey, () => cacheWrapInternal(key, method, ttl, options, epochKey));
 }
 
 async function cacheWrapInternal(key: string, method: () => Promise<any>, ttl: number, options: any, versionedKey: string): Promise<any> {
@@ -456,13 +492,18 @@ async function cacheWrapInternal(key: string, method: () => Promise<any>, ttl: n
     resultClassifier = classifyResult,
     maxRetries = SELF_HEALING_CONFIG.maxRetries,
     onHit,
+    refreshAhead = false,
   } = options;
+
+  const wantsRefreshAhead = refreshAhead === true && isRefreshAheadEnabled();
 
   let retries = 0;
 
   while (retries <= maxRetries) {
   try {
-    const cached = await redis.getBuffer(versionedKey);
+    const [cached, pttlMs] = wantsRefreshAhead
+      ? await Promise.all([redis.getBuffer(versionedKey), redis.pttl(versionedKey)])
+      : [await redis.getBuffer(versionedKey), -1];
     if (cached) {
         try {
           const parsed = await decodeCachePayload(cached);
@@ -491,6 +532,25 @@ async function cacheWrapInternal(key: string, method: () => Promise<any>, ttl: n
               }
             }
             updateCacheHealth(versionedKey, 'hit', true);
+
+            if (wantsRefreshAhead) {
+              try {
+                if (isDueForRefresh(pttlMs, ttl) && wasCachedAtNominalTtl(resultClassifier, parsed, key)) {
+                  runRefreshAhead(versionedKey, async () => {
+                    const fresh = await method();
+                    if (fresh === null || fresh === undefined) return false;
+                    if (resultClassifier(fresh, null, key).type !== 'SUCCESS') return false;
+                    if (!mayReplaceOnRefresh(parsed, fresh)) return false;
+                    if (!cacheValidator.validateBeforeCache(fresh, contentTypeForKey(key)).isValid) return false;
+                    const written = await redis.set(versionedKey, await encodeCachePayload(fresh), 'EX', ttl, 'XX');
+                    return Boolean(written);
+                  }, pttlMs).catch(() => {});
+                }
+              } catch (refreshError: any) {
+                cacheLogger.warn(`[Cache] Refresh-ahead check failed for ${versionedKey}:`, refreshError);
+              }
+            }
+
             return parsed;
           }
         } catch (parseError: any) {
@@ -508,16 +568,7 @@ async function cacheWrapInternal(key: string, method: () => Promise<any>, ttl: n
       updateCacheHealth(versionedKey, 'miss', true);
 
     if (result !== null && result !== undefined) {
-        let contentType = 'unknown';
-        if (key.startsWith('meta')) {
-          contentType = 'meta';
-        } else if (key.startsWith('catalog')) {
-          contentType = 'catalog';
-        } else if (key.startsWith('search')) {
-          contentType = 'search';
-        } else if (key.startsWith('genre')) {
-          contentType = 'genre';
-        }
+        const contentType = contentTypeForKey(key);
         const validation = cacheValidator.validateBeforeCache(result, contentType);
 
         if (!validation.isValid) {
@@ -590,9 +641,9 @@ async function cacheWrapGlobal(key: string, method: () => Promise<any>, ttl: num
     return method();
   }
 
-  const { skipVersion = false } = options;
-  const versionedKey = skipVersion ? `global:${key}` : `global:${ADDON_VERSION}:${key}`;
-  return singleFlight(versionedKey, () => cacheWrapGlobalInternal(key, method, ttl, options, versionedKey));
+  const { upstream = false } = options;
+  const epochKey = upstream ? `global:${key}` : withGlobalEpoch(key);
+  return singleFlight(epochKey, () => cacheWrapGlobalInternal(key, method, ttl, options, epochKey));
 }
 
 async function cacheWrapGlobalInternal(key: string, method: () => Promise<any>, ttl: number, options: any, versionedKey: string): Promise<any> {
@@ -872,53 +923,39 @@ function buildMetaComponentCacheKeys({ config, metaId, type, useShowPoster = fal
     providerOptions: ctx.providerOptions,
   };
 
-  const basicProfile = {
-    ...commonProvider,
-  };
-  const posterProfile = {
+  const commonHash = hashProfile(commonProvider);
+  const posterHash = hashProfile({
     ...artCommon,
     artProvider: ctx.artProvider.poster,
     useShowPosterForUpNext: !!ctx.useShowPoster,
-  };
-  const backgroundProfile = {
+  });
+  const backgroundHash = hashProfile({
     ...artCommon,
     artProvider: ctx.artProvider.background,
-  };
-  const logoProfile = {
+  });
+  const logoHash = hashProfile({
     ...artCommon,
     artProvider: ctx.artProvider.logo,
-  };
-  const videosProfile = {
+  });
+  const videosHash = hashProfile({
     ...commonProvider,
     videoOptions: ctx.videoOptions,
-  };
-  const creditsProfile = {
-    ...commonProvider,
-  };
-  const linksProfile = {
-    ...commonProvider,
-  };
-  const trailersProfile = {
-    ...commonProvider,
-  };
-  const extrasProfile = {
-    ...commonProvider,
-  };
+  });
 
   return {
-    basic: `meta-basic:${hashProfile(basicProfile)}:${metaId}`,
-    poster: `meta-poster:${hashProfile(posterProfile)}:${metaId}`,
-    rawPoster: `meta-raw-poster:${hashProfile(posterProfile)}:${metaId}`,
-    background: `meta-background:${hashProfile(backgroundProfile)}:${metaId}`,
-    landscapePoster: `meta-landscape-poster:${hashProfile(backgroundProfile)}:${metaId}`,
-    logo: `meta-logo:${hashProfile(logoProfile)}:${metaId}`,
-    videos: `meta-videos:${hashProfile(videosProfile)}:${metaId}`,
-    cast: `meta-cast:${hashProfile(creditsProfile)}:${metaId}`,
-    director: `meta-director:${hashProfile(creditsProfile)}:${metaId}`,
-    writer: `meta-writer:${hashProfile(creditsProfile)}:${metaId}`,
-    links: `meta-links:${hashProfile(linksProfile)}:${metaId}`,
-    trailers: `meta-trailers:${hashProfile(trailersProfile)}:${metaId}`,
-    extras: `meta-extras:${hashProfile(extrasProfile)}:${metaId}`,
+    basic: `meta-basic:${commonHash}:${metaId}`,
+    poster: `meta-poster:${posterHash}:${metaId}`,
+    rawPoster: `meta-raw-poster:${posterHash}:${metaId}`,
+    background: `meta-background:${backgroundHash}:${metaId}`,
+    landscapePoster: `meta-landscape-poster:${backgroundHash}:${metaId}`,
+    logo: `meta-logo:${logoHash}:${metaId}`,
+    videos: `meta-videos:${videosHash}:${metaId}`,
+    cast: `meta-cast:${commonHash}:${metaId}`,
+    director: `meta-director:${commonHash}:${metaId}`,
+    writer: `meta-writer:${commonHash}:${metaId}`,
+    links: `meta-links:${commonHash}:${metaId}`,
+    trailers: `meta-trailers:${commonHash}:${metaId}`,
+    extras: `meta-extras:${commonHash}:${metaId}`,
   };
 }
 
@@ -1031,12 +1068,13 @@ function applyCastCountProjection(meta: any, config: any): any {
   return meta;
 }
 
-function projectMetaForUser(meta: any, config: any): any {
+async function projectMetaForUser(meta: any, config: any): Promise<any> {
   if (!meta) return meta;
   applyCastCountProjection(meta, config);
   applyBlurThumbProjection(meta, config);
   applyDisplayAgeRatingProjection(meta, config);
   applyLinksUserScopeProjection(meta, config);
+  await applyImdbRatingProjection(meta);
   return meta;
 }
 
@@ -1207,6 +1245,7 @@ async function cacheWrapCatalog(userUUID: string, catalogKey: string, method: ()
   const isSimklDiscoverCatalog = idOnly.startsWith('simkl.discover.');
   const isMalDiscoverCatalog = idOnly.startsWith('mal.discover.');
   const isDiscoverCatalog = isTmdbDiscoverCatalog || isTvdbDiscoverCatalog || isAniListDiscoverCatalog || isSimklDiscoverCatalog || isMalDiscoverCatalog;
+  const isMergedCatalog = idOnly.startsWith('merged.');
   const shouldExcludeLanguageForMAL = isMALCatalog && isMALAnimeProvider;
 
   const catalogFromConfig = config.catalogs?.find((c: any) => c.id === idOnly && c.type === catalogType);
@@ -1225,7 +1264,7 @@ async function cacheWrapCatalog(userUUID: string, catalogKey: string, method: ()
     showMetaProviderAttribution: config.showMetaProviderAttribution || false,
   };
 
-  const isMDBListWatchlistOrUpNext = idOnly.startsWith('mdblist.watchlist') || idOnly === 'mdblist.upnext';
+  const isMDBListWatchlistOrUpNext = idOnly.startsWith('mdblist.watchlist') || idOnly === 'mdblist.upnext' || idOnly.startsWith('mdblist.recommended.');
   if (isMDBListCatalog && isMDBListWatchlistOrUpNext) {
     catalogConfig.apiKeys = {
       mdblist: config.apiKeys?.mdblist || process.env.MDBLIST_API_KEY || ''
@@ -1251,6 +1290,18 @@ async function cacheWrapCatalog(userUUID: string, catalogKey: string, method: ()
   if (isAniListUserList) {
     catalogConfig.apiKeys = {
       anilistTokenId: config.apiKeys?.anilistTokenId || ''
+    };
+  }
+
+  if (idOnly.startsWith('mal.userlist.') || idOnly === 'mal.suggestions') {
+    catalogConfig.apiKeys = {
+      malTokenId: config.apiKeys?.malTokenId || ''
+    };
+  }
+
+  if (idOnly.startsWith('movielens.')) {
+    catalogConfig.apiKeys = {
+      movieLensCredId: config.apiKeys?.movieLensCredId || ''
     };
   }
 
@@ -1299,10 +1350,26 @@ async function cacheWrapCatalog(userUUID: string, catalogKey: string, method: ()
     }
   }
 
-  if (idOnly.startsWith('simkl.trending.')) {
+  if (idOnly.startsWith('mal.userlist.') || idOnly === 'mal.suggestions') {
+    const catCfg = config.catalogs?.find((c: any) => c.id === idOnly);
+    if (catCfg?.cacheTTL) {
+      cacheTTL = catCfg.cacheTTL;
+      cacheLogger.debug(`[Catalog] Using custom cache TTL for MAL user list catalog ${idOnly}: ${cacheTTL}s`);
+    }
+  }
+
+  if (idOnly.startsWith('simkl.trending.') || idOnly.startsWith('simkl.recipe.')) {
     const catCfg = config.catalogs?.find((c: any) => c.id === idOnly);
     cacheTTL = Math.max(catCfg?.cacheTTL || CATALOG_TTL(), 3600);
-    cacheLogger.debug(`[Catalog] Using cache TTL for Simkl trending catalog ${idOnly}: ${cacheTTL}s`);
+    cacheLogger.debug(`[Catalog] Using cache TTL for Simkl catalog ${idOnly}: ${cacheTTL}s`);
+  }
+
+  if (idOnly.startsWith('simkl.watchlist.')) {
+    const catCfg = config.catalogs?.find((c: any) => c.id === idOnly);
+    if (catCfg?.cacheTTL) {
+      cacheTTL = catCfg.cacheTTL;
+      cacheLogger.debug(`[Catalog] Using custom cache TTL for Simkl watchlist catalog ${idOnly}: ${cacheTTL}s`);
+    }
   }
 
   if (idOnly.startsWith('letterboxd.')) {
@@ -1345,6 +1412,11 @@ async function cacheWrapCatalog(userUUID: string, catalogKey: string, method: ()
     }
   }
 
+  if (isMergedCatalog) {
+    cacheTTL = 0;
+    cacheLogger.debug(`[Catalog] Skipping outer cache for merged catalog ${idOnly} (sources cache internally)`);
+  }
+
   let key: string;
   if (isAuthCatalog) {
     const sessionId = config.sessionId || '';
@@ -1378,9 +1450,13 @@ async function cacheWrapCatalog(userUUID: string, catalogKey: string, method: ()
       },
     };
   }
+  if (idOnly.startsWith('movielens.')) {
+    options = { ...options, resultClassifier: classifyResultAllowEmpty };
+  }
   const existingOnHit = options.onHit;
   options = {
     ...options,
+    refreshAhead: !isAiringTodayCatalog,
     onHit: (hit: any) => {
       if (typeof existingOnHit === 'function') {
         existingOnHit(hit);
@@ -1412,6 +1488,8 @@ async function cacheWrapCatalog(userUUID: string, catalogKey: string, method: ()
       }
     }
   }
+
+  await applyImdbRatingProjectionToList(result?.metas);
 
   return result;
   }
@@ -1464,6 +1542,7 @@ async function cacheWrapSearch(userUUID: string, searchKey: string, method: () =
     aiProvider: config.search?.ai_provider || 'gemini',
     aiModel: config.search?.ai_model || '',
     aiWebSearch: config.search?.ai_web_search || false,
+    aiOpenrouterWebSearch: config.search?.ai_openrouter_web_search !== false,
   };
 
   const searchConfigString = JSON.stringify(searchConfig);
@@ -1478,6 +1557,7 @@ async function cacheWrapSearch(userUUID: string, searchKey: string, method: () =
     return normalizeReleaseAvailabilityInPayload(await method());
   }, SEARCH_TTL, options);
   normalizeReleaseAvailabilityInPayload(result);
+  await applyImdbRatingProjectionToList(result?.metas);
   return result;
 }
 
@@ -1616,7 +1696,7 @@ async function writeMetaComponentsWithConfig({ config, metaId, result, ttl = MET
 
   try {
     const requestTracker = require('./requestTracker');
-    requestTracker.captureMetadataFromComponents(metaId, meta, meta.type).catch(() => {});
+    requestTracker.captureMetadataFromComponents(metaId, meta, meta.type, config?.language || 'en-US').catch(() => {});
   } catch (error: any) {
     cacheLogger.warn(`Failed to capture metadata for dashboard: ${error.message}`);
   }
@@ -1654,7 +1734,8 @@ async function writeMetaComponentsWithConfig({ config, metaId, result, ttl = MET
       _hasLandscapePoster: !!meta.landscapePoster,
       _hasLogo: !!meta.logo,
       _hasVideos: !!(meta.videos && Array.isArray(meta.videos) && meta.videos.length > 0),
-      _hasLinks: !!(meta.links && Array.isArray(meta.links) && meta.links.length > 0)
+      _hasLinks: !!(meta.links && Array.isArray(meta.links) && meta.links.length > 0),
+      _metaProvider: meta._metaProvider
    };
 
    queueComponentCache(componentsToCache, componentCacheKeys.basic, basicMeta);
@@ -1694,7 +1775,7 @@ async function writeMetaComponentsWithConfig({ config, metaId, result, ttl = MET
    }
 
    if (meta.videos && Array.isArray(meta.videos) && meta.videos.length > 0) {
-     queueComponentCache(componentsToCache, componentCacheKeys.videos, { videos: canonicalizeVideosForCache(meta.videos) });
+     queueComponentCache(componentsToCache, componentCacheKeys.videos, { videos: canonicalizeVideosForCache(meta.videos), _metaProvider: meta._metaProvider });
    }
 
    if (meta.app_extras?.cast?.length) {
@@ -1723,7 +1804,17 @@ async function writeMetaComponentsWithConfig({ config, metaId, result, ttl = MET
    }
 
   await cacheComponentsPipeline(componentsToCache, ttl, { overwrite });
-   return { meta: projectMetaForUser(meta, config) };
+
+  try {
+    const coldStore = require('./metaColdStore');
+    if (coldStore.isEnabled()) {
+      coldStore.writeThrough(meta, componentsToCache);
+    }
+  } catch (coldErr: any) {
+    cacheLogger.warn(`[ColdStore] write-through failed for ${metaId}: ${coldErr?.message}`);
+  }
+
+   return { meta: await projectMetaForUser(meta, config) };
 }
 
 async function writeMetaComponentsBatchWithConfig({ config, metas, ttl = META_TTL(), type = null, useShowPoster = false, overwrite = true }: { config: any; metas: any[]; ttl?: number; type?: string | null; useShowPoster?: boolean; overwrite?: boolean }): Promise<{ written: number; skipped: number }> {
@@ -1788,7 +1879,7 @@ async function reconstructMetaFromComponents(userUUID: string, metaId: string, t
   });
 }
 
-async function reconstructMetaFromComponentsWithConfig({ config, metaId, type = null, includeVideos = true, useShowPoster = false }: { config: any; metaId: string; type?: string | null; includeVideos?: boolean; useShowPoster?: boolean }): Promise<any> {
+async function reconstructMetaFromComponentsWithConfig({ config, metaId, type = null, includeVideos = true, useShowPoster = false, countColdStoreMiss = true }: { config: any; metaId: string; type?: string | null; includeVideos?: boolean; useShowPoster?: boolean; countColdStoreMiss?: boolean }): Promise<any> {
   if (!metaId || typeof metaId !== 'string') {
     cacheLogger.warn(`Invalid metaId provided: ${metaId}`);
     return { errorReason: 'invalid metaId' };
@@ -1805,7 +1896,7 @@ async function reconstructMetaFromComponentsWithConfig({ config, metaId, type = 
     return includeVideos || componentName !== 'videos';
   });
   const componentNames = componentEntries.map(([componentName]) => componentName);
-  const cacheKeys = componentEntries.map(([, key]) => `v${ADDON_VERSION}:${key}`);
+  const cacheKeys = componentEntries.map(([, key]) => withEpoch(key));
 
   let componentResults: any[];
 
@@ -1832,6 +1923,35 @@ async function reconstructMetaFromComponentsWithConfig({ config, metaId, type = 
       cacheLogger.warn(`Error fetching components with MGET:`, error);
       componentResults = componentNames.map(componentName => ({ componentName, data: null }));
     }
+  }
+
+  try {
+    const coldStore = require('./metaColdStore');
+    if (coldStore.isEnabled()) {
+      const missing: Array<{ idx: number; key: string }> = [];
+      componentResults.forEach((result: any, idx: number) => {
+        if (result.data === null && cacheKeys[idx]) missing.push({ idx, key: cacheKeys[idx] });
+      });
+      if (missing.length > 0) {
+        const found = await coldStore.readThrough(missing.map(m => m.key));
+        if (found.size > 0) {
+          const rewarm = redis.pipeline();
+          for (const { idx, key } of missing) {
+            const hit = found.get(key);
+            if (!hit) continue;
+            componentResults[idx].data = hit.data;
+            rewarm.set(key, hit.buffer, 'EX', META_TTL());
+          }
+          rewarm.exec().catch(() => {});
+          cacheHealth.coldStoreHits += 1;
+          cacheHealth.coldStoreComponents += found.size;
+        } else if (countColdStoreMiss) {
+          cacheHealth.coldStoreMisses += 1;
+        }
+      }
+    }
+  } catch (coldErr: any) {
+    cacheLogger.warn(`[ColdStore] read-through failed for ${metaId}: ${coldErr?.message}`);
   }
 
   const availableComponents = componentResults.filter((result: any) => result.data !== null);
@@ -1902,6 +2022,13 @@ async function reconstructMetaFromComponentsWithConfig({ config, metaId, type = 
             updateCacheHealth(`meta:reconstructed:${metaId}`, 'miss', true);
             return { errorReason: 'corrupted: missing links' };
         }
+    }
+
+    const videosComponentForStamp = availableComponents.find((c: any) => c.componentName === 'videos');
+    if (videosComponentForStamp && bd._metaProvider && videosComponentForStamp.data._metaProvider && bd._metaProvider !== videosComponentForStamp.data._metaProvider) {
+        cacheLogger.warn(`[Reconstruct] Provider mismatch for ${metaId}: basic=${bd._metaProvider}, videos=${videosComponentForStamp.data._metaProvider}.`);
+        updateCacheHealth(`meta:reconstructed:${metaId}`, 'miss', true);
+        return { errorReason: 'provider mismatch between basic and videos' };
     }
   }
 
@@ -1991,7 +2118,7 @@ async function reconstructMetaFromComponentsWithConfig({ config, metaId, type = 
   const metaReconstructionKey = `meta:reconstructed:${metaId}`;
   updateCacheHealth(metaReconstructionKey, 'hit', true);
 
-  return { meta: projectMetaForUser(reconstructedMeta, config) };
+  return { meta: await projectMetaForUser(reconstructedMeta, config) };
 }
 
 async function cacheWrapMetaSmart(userUUID: string, metaId: string, method: () => Promise<any>, ttl: number = META_TTL(), options: any = {}, type: string | null = null, includeVideos: boolean = true, useShowPoster: boolean = false): Promise<any> {
@@ -2032,7 +2159,7 @@ async function cacheWrapMetaSmart(userUUID: string, metaId: string, method: () =
   cacheLogger.debug(`[Meta] Component reconstruction failed for ${metaId}${failureReason}`);
 
   const lockContextHash = getMetaSmartLockContextHash(config, metaId, type, includeVideos, useShowPoster);
-  const lockKey = `meta-smart:v${ADDON_VERSION}:${userUUID || 'global'}:${type || 'unknown'}:${lockContextHash}:videos=${includeVideos ? 1 : 0}:showPoster=${useShowPoster ? 1 : 0}:${metaId}`;
+  const lockKey = withEpoch(`meta-smart:${userUUID || 'global'}:${type || 'unknown'}:${lockContextHash}:videos=${includeVideos ? 1 : 0}:showPoster=${useShowPoster ? 1 : 0}:${metaId}`);
 
   return singleFlight(lockKey, async () => {
     const reconstructedAfterWait = await reconstructMetaFromComponentsWithConfig({
@@ -2041,6 +2168,7 @@ async function cacheWrapMetaSmart(userUUID: string, metaId: string, method: () =
       type,
       includeVideos,
       useShowPoster,
+      countColdStoreMiss: false,
     });
 
     if (reconstructedAfterWait && reconstructedAfterWait.meta) {
@@ -2059,6 +2187,13 @@ async function cacheWrapMetaSmart(userUUID: string, metaId: string, method: () =
     }
 
     const meta = result.meta;
+
+    if (meta.__degradedFallback) {
+      delete meta.__degradedFallback;
+      cacheLogger.warn(`[Meta] Skipping cache for degraded fallback result: ${metaId}`);
+      return result;
+    }
+
     let idToCache = meta.id;
 
     if (!idToCache || typeof idToCache !== 'string') {
@@ -2094,7 +2229,7 @@ async function cacheComponentsPipeline(components: any[], ttl: number, options: 
   const queuedCommands: string[] = [];
 
   for (const { cacheKey, componentData } of components) {
-    const versionedKey = `v${ADDON_VERSION}:${cacheKey}`;
+    const versionedKey = withEpoch(cacheKey);
 
     try {
       const payload = await encodeCachePayload(componentData);
@@ -2129,21 +2264,21 @@ function cacheWrapJikanApi(key: string, method: () => Promise<any>, customTTL: n
   const subkey = key.replace(/\s/g, '-');
   const ttl = customTTL !== null ? customTTL : JIKAN_API_TTL;
 
-  const jikanResultClassifier = (result: any, error: any = null) => {
-    if (error) {
-      if (error.response?.status === 429 || error.message?.includes('429')) {
-        cacheLogger.debug(`Jikan Cache - Skipping cache for rate limit error: ${key}`);
-        return { type: 'SKIP_CACHE', ttl: 0 };
-      }
-      return classifyResult(result, error);
+  // The key has to be forwarded: without it classifyResult cannot tell this is an
+  // external API, and every endpoint returning a bare object reads as empty.
+  const jikanResultClassifier = (result: any, error: any = null, cacheKey: string | null = null) => {
+    if (error && (error.response?.status === 429 || error.message?.includes('429'))) {
+      cacheLogger.debug(`Jikan Cache - Skipping cache for rate limit error: ${key}`);
+      return { type: 'SKIP_CACHE', ttl: 0 };
     }
 
-    return classifyResult(result, error);
+    return classifyResult(result, error, cacheKey);
   };
 
   return cacheWrapGlobal(`jikan-api:${subkey}`, method, ttl, {
     resultClassifier: jikanResultClassifier,
-    ...options
+    ...options,
+    upstream: true,
   });
 }
 
@@ -2154,7 +2289,7 @@ function cacheWrapMDBListGenres(genreType: string, method: () => Promise<any>): 
 
 function cacheWrapTraktGenres(genreType: string, method: () => Promise<any>): Promise<any> {
   cacheLogger.debug(`Caching Trakt genres for type: ${genreType}`);
-  return cacheWrapGlobal(`trakt-genres-${genreType}`, method, MDBLIST_GENRES_TTL, { skipVersion: true });
+  return cacheWrapGlobal(`trakt-genres-${genreType}`, method, MDBLIST_GENRES_TTL, { upstream: true });
 }
 
 function cacheWrapStremThruGenres(catalogUrl: string, method: () => Promise<any>): Promise<any> {
@@ -2220,7 +2355,7 @@ function cacheWrapTvdbApi(key: string, method: () => Promise<any>): Promise<any>
 
   return cacheWrapGlobal(`tvdb-api:${key}`, method, TVDB_API_TTL, {
     resultClassifier: tvdbResultClassifier,
-    skipVersion: true
+    upstream: true
   });
 }
 
@@ -2253,6 +2388,10 @@ function getCacheHealth(): any {
     errors: cacheHealth.errors,
     cachedErrors: cacheHealth.cachedErrors,
     corruptedEntries: cacheHealth.corruptedEntries,
+    coldStoreHits: cacheHealth.coldStoreHits,
+    coldStoreMisses: cacheHealth.coldStoreMisses,
+    coldStoreComponents: cacheHealth.coldStoreComponents,
+    refreshAhead: getRefreshAheadStats(),
     hitRate: total > 0 ? ((cacheHealth.hits / total) * 100).toFixed(2) : '0.00',
     errorRate: total > 0 ? ((cacheHealth.errors / total) * 100).toFixed(2) : '0.00',
     totalRequests: total,
@@ -2269,6 +2408,10 @@ function clearCacheHealth(): void {
   cacheHealth.errors = 0;
   cacheHealth.cachedErrors = 0;
   cacheHealth.corruptedEntries = 0;
+  cacheHealth.coldStoreHits = 0;
+  cacheHealth.coldStoreMisses = 0;
+  cacheHealth.coldStoreComponents = 0;
+  resetRefreshAheadStats();
   cacheHealth.errorCounts = {};
   cacheHealth.keyAccessCounts.clear();
   cacheHealthLogger.info('Statistics cleared');
@@ -2308,6 +2451,7 @@ export {
   redis,
   cacheWrap,
   cacheWrapGlobal,
+  classifyResultAllowEmpty,
   deleteKeysByPattern,
   scanKeys,
   cacheWrapCatalog,
@@ -2339,6 +2483,7 @@ module.exports = {
   redis,
   cacheWrap,
   cacheWrapGlobal,
+  classifyResultAllowEmpty,
   deleteKeysByPattern,
   scanKeys,
   cacheWrapCatalog,

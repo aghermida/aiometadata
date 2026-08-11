@@ -429,8 +429,28 @@ async function fetchTraktHistory(
   }
 }
 
+async function getTraktRatings(accessToken: string): Promise<any[]> {
+  try {
+    const url = `${TRAKT_BASE_URL}/sync/ratings/movies`;
+    const response: any = await makeRateLimitedRequest(
+      () => httpGet(url, {
+        dispatcher: traktDispatcher,
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'trakt-api-version': '2',
+          'trakt-api-key': TRAKT_CLIENT_ID
+        }
+      }),
+      'Trakt Ratings Sync', 3, accessToken
+    );
+    return Array.isArray(response.data) ? response.data : [];
+  } catch (error) {
+    return [];
+  }
+}
+
 async function fetchTraktUpdatedShows(
-  accessToken: string, 
+  accessToken: string,
   startAt: string,
   page: number = 1,
   limit: number = 100
@@ -605,7 +625,7 @@ async function fetchTraktUpNextEpisodes(
           return resp.data;
         },
         86400, // 1 day TTL
-        { skipVersion: true }
+        { upstream: true }
       );
       showDataMap.set(showId, data);
     } catch(e) {}
@@ -786,23 +806,53 @@ async function fetchTraktLastActivity(accessToken: string): Promise<any> {
  * @param accessToken - User's Trakt access token
  * @returns array of watched shows
  */
+/**
+ * Fetch all pages of a /sync/watched endpoint (OAuth required, paginated at 100)
+ */
+async function fetchTraktWatchedPaginated(accessToken: string, mediaType: 'shows' | 'movies', extended?: string): Promise<any[]> {
+  const items: any[] = [];
+  let currentPage = 1;
+  let totalPages = 1;
+  const limit = 100;
+  const MAX_PAGES = 50;
+
+  do {
+    let url = `${TRAKT_BASE_URL}/sync/watched/${mediaType}?page=${currentPage}&limit=${limit}`;
+    if (extended) url += `&extended=${extended}`;
+    const response: any = await makeRateLimitedRequest(
+      () => httpGet(url, {
+        dispatcher: traktDispatcher,
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          'trakt-api-version': '2',
+          'trakt-api-key': TRAKT_CLIENT_ID
+        }
+      }),
+      `Trakt fetchWatched (${mediaType} page ${currentPage})`,
+      3,
+      accessToken
+    );
+
+    const paginationHeaders = response.headers || {};
+    totalPages = paginationHeaders['x-pagination-page-count']
+      ? parseInt(paginationHeaders['x-pagination-page-count'])
+      : 1;
+
+    if (Array.isArray(response.data)) {
+      items.push(...response.data);
+    }
+    currentPage++;
+  } while (currentPage <= totalPages && currentPage <= MAX_PAGES);
+
+  if (totalPages > 1) {
+    logger.debug(`Fetched ${items.length} watched ${mediaType} from Trakt across ${Math.min(totalPages, MAX_PAGES)} pages`);
+  }
+  return items;
+}
+
 async function fetchTraktWatchedShows(accessToken: string): Promise<any[]> {
-  const url = `${TRAKT_BASE_URL}/sync/watched/shows?extended=noseasons`;
-  const response: any = await makeRateLimitedRequest(
-    () => httpGet(url, {
-      dispatcher: traktDispatcher,
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-        'trakt-api-version': '2',
-        'trakt-api-key': TRAKT_CLIENT_ID
-      }
-    }),
-    'Trakt fetchWatchedShows',
-    3,
-    accessToken
-  );
-  return Array.isArray(response.data) ? response.data : [];
+  return fetchTraktWatchedPaginated(accessToken, 'shows', 'noseasons');
 }
 
 /**
@@ -811,22 +861,7 @@ async function fetchTraktWatchedShows(accessToken: string): Promise<any[]> {
  * @returns array of watched shows with season data
  */
 async function fetchTraktWatchedShowsFull(accessToken: string): Promise<any[]> {
-  const url = `${TRAKT_BASE_URL}/sync/watched/shows?extended=full`;
-  const response: any = await makeRateLimitedRequest(
-    () => httpGet(url, {
-      dispatcher: traktDispatcher,
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-        'trakt-api-version': '2',
-        'trakt-api-key': TRAKT_CLIENT_ID
-      }
-    }),
-    'Trakt fetchWatchedShowsFull',
-    3,
-    accessToken
-  );
-  return Array.isArray(response.data) ? response.data : [];
+  return fetchTraktWatchedPaginated(accessToken, 'shows', 'progress');
 }
 
 /**
@@ -835,22 +870,7 @@ async function fetchTraktWatchedShowsFull(accessToken: string): Promise<any[]> {
  * @returns array of watched movies
  */
 async function fetchTraktWatchedMovies(accessToken: string): Promise<any[]> {
-  const url = `${TRAKT_BASE_URL}/sync/watched/movies`;
-  const response: any = await makeRateLimitedRequest(
-    () => httpGet(url, {
-      dispatcher: traktDispatcher,
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-        'trakt-api-version': '2',
-        'trakt-api-key': TRAKT_CLIENT_ID
-      }
-    }),
-    'Trakt fetchWatchedMovies',
-    3,
-    accessToken
-  );
-  return Array.isArray(response.data) ? response.data : [];
+  return fetchTraktWatchedPaginated(accessToken, 'movies');
 }
 
 /**
@@ -915,6 +935,47 @@ async function fetchTraktDroppedShows(accessToken: string): Promise<Set<number>>
 }
 
 /**
+ * Fetch shows with episodes that aired in the last N days from the user's
+ * Trakt calendar (OAuth required)
+ * @returns Map of trakt show id -> most recent first_aired within the window
+ */
+async function fetchTraktMyRecentShowAirings(accessToken: string, days: number): Promise<Map<number, string>> {
+  const airings = new Map<number, string>();
+  try {
+    const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    const response: any = await makeRateLimitedRequest(
+      () => httpGet(`${TRAKT_BASE_URL}/calendars/my/shows/${startDate}/${days + 1}`, {
+        dispatcher: traktDispatcher,
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          'trakt-api-version': '2',
+          'trakt-api-key': TRAKT_CLIENT_ID
+        }
+      }),
+      'Trakt fetchMyCalendarShows',
+      3,
+      accessToken
+    );
+    if (Array.isArray(response.data)) {
+      const now = Date.now();
+      for (const entry of response.data) {
+        const showId = entry?.show?.ids?.trakt;
+        if (!showId || !entry.first_aired) continue;
+        if (new Date(entry.first_aired).getTime() > now) continue;
+        const prev = airings.get(showId);
+        if (!prev || new Date(entry.first_aired) > new Date(prev)) {
+          airings.set(showId, entry.first_aired);
+        }
+      }
+    }
+  } catch (error: any) {
+    logger.warn(`Failed to fetch my-calendar shows: ${error?.message || String(error)}`);
+  }
+  return airings;
+}
+
+/**
  * Fetch watched progress for a show (OAuth required)
  * @param accessToken - User's Trakt access token
  * @param showId - Trakt show ID
@@ -966,19 +1027,32 @@ async function fetchTraktUnwatchedEpisodes(
   logger.info(`Unwatched: Changes detected or no cache, rebuilding list (watched_at: ${currentWatchedAt})`);
 
   const watchedStart = Date.now();
-  const [watchedShows, droppedShowIds] = await Promise.all([
+  const [watchedShows, droppedShowIds, recentAirings] = await Promise.all([
     fetchTraktWatchedShows(accessToken),
-    fetchTraktDroppedShows(accessToken)
+    fetchTraktDroppedShows(accessToken),
+    fetchTraktMyRecentShowAirings(accessToken, 30)
   ]);
   const watchedTime = Date.now() - watchedStart;
-  
+
   // Filter out dropped shows
-  const activeWatchedShows = watchedShows.filter(show => {
+  let activeWatchedShows = watchedShows.filter(show => {
     const showId = show?.show?.ids?.trakt;
     return showId && !droppedShowIds.has(showId);
   });
-  
+
   logger.info(`Unwatched: watched shows fetch took ${watchedTime}ms (${watchedShows.length} total, ${activeWatchedShows.length} active after filtering ${droppedShowIds.size} dropped)`);
+
+  // Recently aired shows get candidate slots ahead of the last_watched_at ordering
+  if (recentAirings.size > 0) {
+    const airedRecently = activeWatchedShows.filter(s => recentAirings.has(s.show.ids.trakt));
+    airedRecently.sort((a, b) =>
+      new Date(recentAirings.get(b.show.ids.trakt)!).getTime() -
+      new Date(recentAirings.get(a.show.ids.trakt)!).getTime()
+    );
+    const rest = activeWatchedShows.filter(s => !recentAirings.has(s.show.ids.trakt));
+    activeWatchedShows = [...airedRecently, ...rest];
+    logger.info(`Unwatched: prioritized ${airedRecently.length} shows with episodes aired in the last 30 days`);
+  }
 
   const MAX_SHOWS = 50; // cap number of series to avoid overlong pages
   const BATCH_SIZE = 30;
@@ -1017,7 +1091,6 @@ async function fetchTraktUnwatchedEpisodes(
           // Only include shows that are not 100% complete and have unwatched aired episodes
           if (progress.completed >= progress.aired) return null;
 
-          logger.debug(`Unwatched: access token ${accessToken}`);
           // Fetch seasons with episode air dates to sort accurately (globally cached - public data)
           const seasonsData: any[] = await cacheWrapGlobal(
             `trakt:show:${showId}:seasons:full_episodes`,
@@ -1038,7 +1111,7 @@ async function fetchTraktUnwatchedEpisodes(
               return Array.isArray(showSeasonsResp.data) ? showSeasonsResp.data : [];
             },
             43200, // 12 hour TTL
-            { skipVersion: true }
+            { upstream: true }
           );
           const airedMap = new Map<string, string>();
           for (const season of seasonsData) {
@@ -1268,7 +1341,7 @@ async function fetchTraktWatchlistItems(
       logger.error(`Error fetching Trakt watchlist, page ${page}:`, err.message);
       throw err;
     }
-  }, ttl, { skipVersion: true });
+  }, ttl, { upstream: true });
 }
 
 /**
@@ -1355,7 +1428,7 @@ async function fetchTraktFavoritesItems(
       logger.error(`Error fetching Trakt favorites for type ${type}, page ${page}:`, err.message);
       throw err;
     }
-  }, ttl, { skipVersion: true });
+  }, ttl, { upstream: true });
 }
 
 /**
@@ -1382,7 +1455,9 @@ async function fetchTraktRecommendationsItems(
   return await cacheWrapGlobal(cacheKey, async () => {
     try {
       // Trakt recommendations endpoint doesn't support pagination, only a limit (max 100)
-      // We use limit=50 and ignore the page parameter
+      if (page > 1) {
+        return { items: [], totalItems: undefined, hasMore: false, totalPages: 1 };
+      }
       const recommendationsLimit = 50;
       const url = `${TRAKT_BASE_URL}/recommendations/${type}?limit=${recommendationsLimit}&ignore_collected=false&ignore_watchlisted=false`;
       
@@ -1441,7 +1516,7 @@ async function fetchTraktRecommendationsItems(
       logger.error(`Error fetching Trakt recommendations for type ${type}, page ${page}:`, err.message);
       throw err;
     }
-  }, ttl, { skipVersion: true });
+  }, ttl, { upstream: true });
 }
 
 /**
@@ -1536,7 +1611,7 @@ async function fetchTraktListItems(
       logger.error(`Error fetching Trakt list ${username}/${listSlug}, page ${page}:`, err.message);
       throw err;
     }
-  }, ttl, { skipVersion: true });
+  }, ttl, { upstream: true });
 }
 
 /**
@@ -1630,7 +1705,7 @@ async function fetchTraktListItemsById(
       logger.error(`Error fetching Trakt list by id ${listId}, page ${page}:`, err.message);
       throw err;
     }
-  }, ttl, { skipVersion: true });
+  }, ttl, { upstream: true });
 }
 
 
@@ -2591,7 +2666,7 @@ async function fetchTraktMostFavoritedItems(
       logger.error(`Error fetching Trakt most favorited ${type} for period ${period}, page ${page}:`, err.message);
       return { items: [], hasMore: false };
     }
-  }, ttl, { skipVersion: true });
+  }, ttl, { upstream: true });
 }
 
 /**
@@ -2648,7 +2723,7 @@ async function fetchTraktTrendingItems(
       logger.error(`Error fetching Trakt trending ${type}, page ${page}:`, err.message);
       throw err;
     }
-  }, ttl, { skipVersion: true });
+  }, ttl, { upstream: true });
 }
 
 /**
@@ -2704,7 +2779,7 @@ async function fetchTraktPopularItems(
       logger.error(`Error fetching Trakt popular ${type}, page ${page}:`, err.message);
       throw err;
     }
-  }, ttl, { skipVersion: true });
+  }, ttl, { upstream: true });
 }
 
 /**
@@ -2760,7 +2835,7 @@ async function fetchTraktAnticipatedItems(
       logger.error(`Error fetching Trakt anticipated ${type}, page ${page}:`, err.message);
       throw err;
     }
-  }, ttl, { skipVersion: true });
+  }, ttl, { upstream: true });
 }
 
 const refreshLocks = new Map<string, Promise<string | null>>();
@@ -3209,4 +3284,6 @@ export {
   traktDispatcher,
   getTraktMemoryStats,
   isTokenInvalidated,
+  getTraktRatings,
+  fetchTraktLastActivity,
 };

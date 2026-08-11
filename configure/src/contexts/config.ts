@@ -1,9 +1,23 @@
+import type { BuilderEntry } from '@shared/types';
+
+export type TagColorKey =
+  | 'blue' | 'green' | 'red' | 'violet' | 'amber' | 'cyan'
+  | 'pink' | 'emerald' | 'orange' | 'indigo' | 'rose' | 'slate';
+
+export const MAX_TAG_NAME_LENGTH = 32;
+
+export interface TagDef {
+  name: string;
+  color: TagColorKey;
+}
+
 export interface CatalogConfig {
   id: string;
   name: string;
   type: 'movie' | 'series' | 'anime' | 'all';
   enabled: boolean;
-  source: 'tmdb' | 'tvdb' | 'mal' | 'tvmaze' | 'mdblist' | 'trakt' | 'streaming' | 'stremthru' | 'custom' | 'anilist' | 'letterboxd' | 'simkl' | 'flixpatrol' | 'publicmetadb'; // Keep source as the display label
+  tags?: string[];
+  source: 'tmdb' | 'tvdb' | 'mal' | 'tvmaze' | 'mdblist' | 'trakt' | 'streaming' | 'stremthru' | 'custom' | 'anilist' | 'letterboxd' | 'simkl' | 'movielens' | 'flixpatrol' | 'publicmetadb' | 'merged'; // Keep source as the display label
   sourceUrl?: string; // Store the actual URL for StremThru and custom catalogs
   showInHome: boolean;
   genres?: string[]; // Optional genres array for catalogs that support genre filtering
@@ -22,12 +36,16 @@ export interface CatalogConfig {
   // MDBList external list score filters
   filter_score_min?: number;
   filter_score_max?: number;
+  // Minimum TMDB vote count filter (tmdb.year catalog)
+  minVotes?: number;
   // Enable RPDB for this catalog (for poster enhancements)
   enableRatingPosters?: boolean;
   // Randomize items within each page on every load
   randomizePerPage?: boolean;
   // Page size for custom/StremThru catalogs (default: 100)
   pageSize?: number;
+  /** If set, this catalog is absorbed into a merged catalog and hidden from UI/manifest */
+  mergedInto?: string;
   // List metadata (item count, privacy, author, description, AniList-specific fields, Trakt Up Next settings, Letterboxd-specific fields, TMDB-specific fields)
   metadata?: {
     itemCount?: number;
@@ -44,10 +62,15 @@ export interface CatalogConfig {
     airingSoonDays?: number;
     // Letterboxd-specific metadata
     isWatchlist?: boolean;
+    // PublicMetaDB list visibility and kind, as the API reports them
+    isPublic?: boolean;
+    listType?: string;
     hideUnreleased?: boolean;
     hideWatchedTrakt?: boolean;
     hideWatchedAnilist?: boolean;
     hideWatchedMdblist?: boolean;
+    hideWatchedSimkl?: boolean;
+    hideUnreleasedDigital?: boolean;
     identifier?: string;
     url?: string;
     // TMDB-specific metadata
@@ -68,6 +91,25 @@ export interface CatalogConfig {
     interval?: 'today' | 'week' | 'month';
     pageSize?: number; // Results per page for Simkl trending and watchlist catalogs (default: 50)
     status?: 'watching' | 'plantowatch' | 'hold' | 'completed' | 'dropped'; // Status for Simkl watchlist catalogs
+    /** Source references for merged catalogs (id starts with 'merged.') */
+    mergedSources?: Array<{
+      catalogId: string;       // source catalog id, e.g. "tmdb.top"
+      catalogType: string;     // source catalog type at merge time
+      originalEnabled: boolean;
+      originalShowInHome: boolean;
+    }>;
+    mergeMode?: 'interleaved' | 'sequential' | 'alternating';
+    // MovieLens-specific metadata
+    sortBy?: string;
+    sortDirection?: string;
+    tags?: string;
+    minYear?: number;
+    maxYear?: number;
+    minPop?: number;
+    maxDaysAgo?: number;
+    maxFutureDays?: number;
+    includeRated?: boolean;
+    listUserId?: number | string;
   };
 }
 
@@ -77,6 +119,23 @@ export interface SearchConfig {
     type: 'movie' | 'series' | 'anime';
     enabled: boolean;
 }
+
+export type WatchTrackingService =
+  | 'trakt'
+  | 'simkl'
+  | 'anilist'
+  | 'mal'
+  | 'mdblist'
+  | 'publicmetadb';
+
+export interface WatchTrackingMediaTypes {
+  movie?: boolean;
+  series?: boolean;
+}
+
+export type WatchTrackingConfig = Partial<
+  Record<WatchTrackingService, WatchTrackingMediaTypes>
+>;
 
 export interface AppConfig {
   language: string;
@@ -139,17 +198,27 @@ export interface AppConfig {
     traktTokenId?: string;
     simklTokenId?: string;
     anilistTokenId?: string;
+    malTokenId?: string;
+    movieLensCredId?: string;
     publicmetadb?: string;
     customDescriptionBlurb?: string;
   };
-  /** Poster rating provider: 'rpdb' for RatingPosterDB, 'top' for Top Poster API, or 'custom' for custom URL patterns */
-  posterRatingProvider?: 'rpdb' | 'top' | 'custom';
+  /** Addon manager integrations (AIOManager, etc.) for syncing the addon into the user's manager, keyed by manager id */
+  managers?: Record<string, {
+    instanceUrl?: string;
+    apiKey?: string;
+  }>;
+  /** Poster rating provider: 'none' to disable rating posters, 'rpdb' for RatingPosterDB, 'top' for Top Poster API, or 'custom' for custom URL patterns */
+  posterRatingProvider?: 'none' | 'rpdb' | 'top' | 'custom';
   usePosterProxy: boolean;
   mdblistWatchTracking: boolean;
   anilistWatchTracking: boolean;
+  malWatchTracking?: boolean;
   simklWatchTracking: boolean;
   traktWatchTracking: boolean;
   publicmetadbWatchTracking: boolean;
+  /** Optional per-service filters. Missing media-type flags preserve legacy behavior and are treated as enabled. */
+  watchTracking?: WatchTrackingConfig;
   /** If true, keep RPDB posters for items in Continue Watching and Library (default: true). When disabled, RPDB posters are removed since catalog context is unavailable. */
   enableRatingPostersForLibrary?: boolean;
   /** If true, display a "⭐ Rate Me" genre button in meta pages that links to the rating page */
@@ -163,25 +232,34 @@ export interface AppConfig {
   hideWatchedTrakt?: boolean;
   hideWatchedAnilist?: boolean;
   hideWatchedMdblist?: boolean;
+  hideWatchedSimkl?: boolean;
   exclusionKeywords?: string;
   regexExclusionFilter?: string;
   exclusionGenres?: string;
   catalogSetupComplete?: boolean;
+  // AI Catalog Builder model, per provider. Unset falls back to the AI search
+  // model when its provider matches, then to the provider default.
+  ai_catalog?: {
+    gemini_model?: string;
+    openrouter_model?: string;
+  };
   searchEnabled: boolean;
   sessionId: string;
   timezone?: string;
   catalogs: CatalogConfig[];
   deletedCatalogs?: string[];
+  /** Collections and rows built in the Collections editor, exported as Nuvio or Fusion JSON */
+  collections?: BuilderEntry[];
   search: {
     enabled: boolean; 
     // This is the switch for the AI layer.
     ai_enabled: boolean; 
     // This stores the primary keyword engine for each type.
     providers: {
-        movie: 'tmdb.search' | 'tvdb.search' | 'trakt.search' | 'mdblist.search';
-        series: 'tmdb.search' | 'tvdb.search' | 'tvmaze.search' | 'trakt.search' | 'mdblist.search';
-        anime_movie: 'mal.search.movie' | 'kitsu.search.movie';
-        anime_series: 'mal.search.series' | 'kitsu.search.series';
+        movie: 'tmdb.search' | 'tvdb.search' | 'trakt.search' | 'mdblist.search' | 'imdb.suggestions.search' | 'simkl.search';
+        series: 'tmdb.search' | 'tvdb.search' | 'tvmaze.search' | 'trakt.search' | 'mdblist.search' | 'imdb.suggestions.search' | 'simkl.search';
+        anime_movie: 'mal.search.movie' | 'kitsu.search.movie' | 'simkl.search.movie';
+        anime_series: 'mal.search.series' | 'kitsu.search.series' | 'simkl.search.series';
         people_search_movie?: 'tmdb.people.search' | 'tvdb.people.search' | 'trakt.people.search';
         people_search_series?: 'tmdb.people.search' | 'tvdb.people.search' | 'trakt.people.search';
     };
@@ -192,8 +270,13 @@ export interface AppConfig {
     // AI search provider and model
     ai_provider?: 'gemini' | 'openrouter' | 'ollama';
     ai_model?: string;
-    // Enable web search: Gemini = google_search grounding tool, OpenRouter = :online suffix
+    // Gemini google_search grounding tool. Off unless set.
     ai_web_search?: boolean;
+    // OpenRouter :online suffix. On unless set to false.
+    ai_openrouter_web_search?: boolean;
+    // Optional keyword that must prefix a query for AI search to run. Blank = always run.
+    // Only affects the AI catalog; regular search catalogs always see the original query.
+    ai_trigger_keyword?: string;
     // RPDB enable/disable per search engine
     engineRatingPosters?: {
       [engine: string]: boolean;
@@ -215,9 +298,12 @@ export interface AppConfig {
     series?: string;
   };
   showDisabledCatalogs?: boolean;
+  tags?: TagDef[];
   catalogModeOnly?: boolean;
+  hideStremioCatalogs?: boolean;
   customPosterUrlPattern?: string;
   customBackgroundUrlPattern?: string;
+  customLandscapeUrlPattern?: string;
   customLogoUrlPattern?: string;
   customThumbnailUrlPattern?: string;
 }
