@@ -6,8 +6,14 @@ function isHideWatchedExcluded(cleanId: string): boolean {
     || cleanId.includes('watchlist')
     || cleanId.includes('favorites')
     || cleanId.includes('up_next')
-    || cleanId.includes('upnext');
+    || cleanId.includes('upnext')
+    || cleanId.includes('completed')
+    || cleanId.includes('history');
 }
+
+const UNRELEASED_STATUSES = new Set([
+  'not yet aired', 'upcoming', 'not_yet_released', 'planned', 'unreleased', 'tba',
+]);
 
 const movieRatingHierarchy = ['G', 'PG', 'PG-13', 'R', 'NC-17'];
 const tvRatingHierarchy = ['TV-Y', 'TV-Y7', 'TV-G', 'TV-PG', 'TV-14', 'TV-MA'];
@@ -64,6 +70,37 @@ interface CatalogFilterOptions {
   cleanId: string;
 }
 
+const WATCHED_FILTERS: [string, string][] = [
+  ['traktTokenId', 'hideWatchedTrakt'],
+  ['anilistTokenId', 'hideWatchedAnilist'],
+  ['mdblist', 'hideWatchedMdblist'],
+  ['simklTokenId', 'hideWatchedSimkl'],
+];
+
+function catalogFiltersActive({ config, catalogConfig, cleanId }: Omit<CatalogFilterOptions, 'type'>): boolean {
+  const isSearch = ['search', 'people_search', 'gemini.search'].includes(cleanId);
+
+  if (!isSearch && config.ageRating && String(config.ageRating).toLowerCase() !== 'none') return true;
+
+  const catalogHideDigital = catalogConfig?.metadata?.hideUnreleasedDigital;
+  const hideUnreleasedDigital = isSearch
+    ? !!config.hideUnreleasedDigitalSearch
+    : (catalogHideDigital !== undefined ? catalogHideDigital : !!config.hideUnreleasedDigital);
+  if (hideUnreleasedDigital) return true;
+
+  if (isSearch ? config.hideUnreleasedShowsSearch : config.hideUnreleasedShows) return true;
+
+  if (!isHideWatchedExcluded(cleanId)) {
+    for (const [credential, flag] of WATCHED_FILTERS) {
+      if (!config.apiKeys?.[credential]) continue;
+      const catalogHide = catalogConfig?.metadata?.[flag];
+      if (catalogHide !== undefined ? catalogHide : !!config[flag]) return true;
+    }
+  }
+
+  return Boolean(config.exclusionKeywords || config.regexExclusionFilter || config.exclusionGenres);
+}
+
 async function applyCatalogFilters(metas: any[], { type, config, catalogConfig, cleanId }: CatalogFilterOptions): Promise<any[]> {
   if (!Array.isArray(metas) || metas.length === 0) return metas;
 
@@ -74,7 +111,12 @@ async function applyCatalogFilters(metas: any[], { type, config, catalogConfig, 
   }
   const hideWatchedExcluded = isHideWatchedExcluded(cleanId);
 
-  if ((isSearch ? config.hideUnreleasedDigitalSearch : config.hideUnreleasedDigital)) {
+  const catalogHideDigital = catalogConfig?.metadata?.hideUnreleasedDigital;
+  const hideUnreleasedDigital = isSearch
+    ? !!config.hideUnreleasedDigitalSearch
+    : (catalogHideDigital !== undefined ? catalogHideDigital : !!config.hideUnreleasedDigital);
+
+  if (hideUnreleasedDigital) {
     const { isReleasedDigitally } = require('./parseProps');
     const before = metas.length;
     metas = metas.filter(meta => meta.type !== 'movie' || isReleasedDigitally(meta));
@@ -88,6 +130,7 @@ async function applyCatalogFilters(metas: any[], { type, config, catalogConfig, 
     const before = metas.length;
     metas = metas.filter(meta => {
       if (meta.type !== 'series') return true;
+      if (UNRELEASED_STATUSES.has(String(meta.status || '').toLowerCase())) return false;
       if (!meta.released) return true;
       return new Date(meta.released) <= now;
     });
@@ -200,6 +243,58 @@ async function applyCatalogFilters(metas: any[], { type, config, catalogConfig, 
     }
   }
 
+  if (metas.length > 0 && config.apiKeys?.simklTokenId) {
+    const globalHide = !!config.hideWatchedSimkl;
+    const catalogHide = catalogConfig?.metadata?.hideWatchedSimkl;
+    const shouldHide = catalogHide !== undefined ? catalogHide : globalHide;
+    if (shouldHide && !hideWatchedExcluded) {
+      try {
+        const { getSimklWatchedIds } = require('./simklUtils');
+        const idMapper = require('../lib/id-mapper');
+        const watchedIds = await getSimklWatchedIds(config);
+        if (watchedIds) {
+          const actualType = catalogConfig?.type || type;
+          const before = metas.length;
+          metas = metas.filter(meta => {
+            const metaId = meta.id || '';
+            const isMovie = (meta.type || actualType) === 'movie';
+            const idSet = isMovie ? watchedIds.movieImdbIds : watchedIds.showImdbIds;
+            if (metaId.startsWith('tt') && idSet.has(metaId)) return false;
+            if (meta.imdb_id && idSet.has(meta.imdb_id)) return false;
+
+            let anilistId: number | null = null;
+            let malId: number | null = null;
+            if (metaId.startsWith('anilist:')) {
+              anilistId = parseInt(metaId.split(':')[1], 10);
+            } else if (metaId.startsWith('mal:')) {
+              malId = parseInt(metaId.split(':')[1], 10);
+            } else if (metaId.startsWith('kitsu:')) {
+              const mapping = idMapper.getMappingByKitsuId(parseInt(metaId.split(':')[1], 10));
+              if (mapping) {
+                anilistId = mapping.anilist_id;
+                malId = mapping.mal_id;
+              }
+            } else if (metaId.startsWith('anidb:')) {
+              const mapping = idMapper.getMappingByAnidbId(parseInt(metaId.split(':')[1], 10));
+              if (mapping) {
+                anilistId = mapping.anilist_id;
+                malId = mapping.mal_id;
+              }
+            }
+            if (malId && watchedIds.malIds.has(malId)) return false;
+            if (anilistId && watchedIds.anilistIds.has(anilistId)) return false;
+            return true;
+          });
+          if (before !== metas.length) {
+            logger.debug(`Hide Simkl watched: removed ${before - metas.length} items`);
+          }
+        }
+      } catch (err: any) {
+        logger.warn(`Hide Simkl watched filter error: ${err.message}`);
+      }
+    }
+  }
+
   if (config.exclusionKeywords || config.regexExclusionFilter || config.exclusionGenres) {
     const { filterMetasByRegex } = require('./regexFilter');
     const before = metas.length;
@@ -212,4 +307,4 @@ async function applyCatalogFilters(metas: any[], { type, config, catalogConfig, 
   return metas;
 }
 
-module.exports = { applyCatalogFilters };
+module.exports = { applyCatalogFilters, catalogFiltersActive };

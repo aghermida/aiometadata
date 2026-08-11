@@ -6,6 +6,14 @@
 import { CatalogConfig } from '@/contexts/ConfigContext';
 import { GenreSelection } from '@/data/genres';
 
+export function supportsMdblistScoreFilters(catalog: { id?: string } | null | undefined): boolean {
+  const id = catalog?.id;
+  if (typeof id !== 'string' || !id.startsWith('mdblist.')) return false;
+  return id !== 'mdblist.upnext'
+    && !id.startsWith('mdblist.discover.')
+    && !id.startsWith('mdblist.recommended.');
+}
+
 /**
  * Determines the catalog type based on MDBList list metadata
  * @param list - MDBList list object with mediatype, movies, shows, items properties
@@ -369,10 +377,24 @@ export function createCustomManifestCatalog(options: CustomManifestCatalogOption
 // FlixPatrol (Streaming Top 10) Catalog Creation
 // ============================================================================
 
+export interface FlixPatrolVariant {
+  id: string;
+  label: string;
+}
+
+export interface FlixPatrolSections {
+  hasMovies: boolean;
+  hasShows: boolean;
+  hasOverall: boolean;
+  movieVariants?: FlixPatrolVariant[];
+  seriesVariants?: FlixPatrolVariant[];
+  overallVariants?: FlixPatrolVariant[];
+}
+
 export interface FlixPatrolCatalogOptions {
   service: { id: string; name: string };
   country: { id: string; name: string; slug: string };
-  sections: { hasMovies: boolean; hasShows: boolean; hasOverall: boolean };
+  sections: FlixPatrolSections;
   displayTypeOverrides?: { movie?: string; series?: string };
 }
 
@@ -414,6 +436,8 @@ export function createFlixPatrolCatalogs(options: FlixPatrolCatalogOptions): Cat
       });
     }
   } else if (sections.hasOverall) {
+    // Default (promoted) overall catalog. English is the bare default, so it is
+    // never present in overallVariants — no phantom English row to suppress.
     catalogs.push({
       id: `flixpatrol.${service.id}.${country.id}.all`,
       type: 'all',
@@ -424,6 +448,19 @@ export function createFlixPatrolCatalogs(options: FlixPatrolCatalogOptions): Cat
       enableRatingPosters: true,
       metadata: { countrySlug: country.slug },
     });
+
+    for (const variant of sections.overallVariants ?? []) {
+      catalogs.push({
+        id: `flixpatrol.${service.id}.${country.id}.all.${variant.id}`,
+        type: 'all',
+        name: `Top 10 on ${service.name} (${country.name}) — ${variant.label}`,
+        enabled: true,
+        showInHome: true,
+        source: 'flixpatrol' as const,
+        enableRatingPosters: true,
+        metadata: { countrySlug: country.slug },
+      });
+    }
   }
 
   return catalogs;
@@ -442,7 +479,14 @@ export function createPublicMetaDBUpNextCatalog(): CatalogConfig {
   };
 }
 
-export function createPublicMetaDBListCatalog(list: { id: string; name: string }, mediaType: 'movie' | 'series' | 'all' = 'all'): CatalogConfig {
+export function createPublicMetaDBListCatalog(
+  list: { id: string; name: string; is_public?: boolean; type?: string },
+  mediaType: 'movie' | 'series' | 'all' = 'all'
+): CatalogConfig {
+  const metadata: CatalogConfig['metadata'] = {};
+  if (typeof list.is_public === 'boolean') metadata.isPublic = list.is_public;
+  if (list.type) metadata.listType = list.type;
+
   return {
     id: `publicmetadb.list.${list.id}`,
     type: mediaType,
@@ -450,6 +494,7 @@ export function createPublicMetaDBListCatalog(list: { id: string; name: string }
     enabled: true,
     showInHome: true,
     source: 'publicmetadb' as const,
+    ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
   };
 }
 

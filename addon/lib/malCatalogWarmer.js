@@ -1,24 +1,26 @@
 const jikan = require('./mal');
 const { cacheWrapJikanApi, cacheWrapCatalog } = require('./getCache');
 const { parseAnimeCatalogMetaBatch } = require('../utils/parseProps');
+const { envInt } = require('../utils/envNumber');
+const malWarmerLogger = (require('consola').default || require('consola')).withTag('MAL Warmer');
 
 // Environment variable configuration with sensible defaults
-const WARMUP_MODE = process.env.CACHE_WARMUP_MODE || 'essential'; // 'essential', 'comprehensive'
+const warmupMode = () => process.env.CACHE_WARMUP_MODE || 'essential'; // 'essential', 'comprehensive'
 const WARMUP_CONFIG = {
   // UUID to use for cache warming (uses this user's config for providers, language, etc.)
   uuid: process.env.CACHE_WARMUP_UUID || 'system-cache-warmer', // Default: system-cache-warmer
   
   // Enable/disable warmup entirely
-  enabled: process.env.MAL_WARMUP_ENABLED !== 'false' && WARMUP_MODE === 'essential', // Default: true
+  enabled: process.env.MAL_WARMUP_ENABLED !== 'false' && warmupMode() === 'essential', // Default: true
   
   // Run warmup every N hours (default: 6 hours)
   intervalHours: parseInt(process.env.MAL_WARMUP_INTERVAL_HOURS) || 6,
   
   // Delay in seconds before first warmup after server start (default: 30s)
-  initialDelaySeconds: parseInt(process.env.MAL_WARMUP_INITIAL_DELAY_SECONDS) || 30,
+  initialDelaySeconds: envInt('MAL_WARMUP_INITIAL_DELAY_SECONDS', 30),
   
   // Extra delay between warmup tasks in ms (default: 100ms)
-  taskDelayMs: parseInt(process.env.MAL_WARMUP_TASK_DELAY_MS) || 100,
+  taskDelayMs: envInt('MAL_WARMUP_TASK_DELAY_MS', 100),
   
   // Enable quiet hours mode (only run during specific UTC hours)
   quietHoursEnabled: process.env.MAL_WARMUP_QUIET_HOURS_ENABLED === 'true', // Default: false
@@ -27,7 +29,7 @@ const WARMUP_CONFIG = {
   quietHoursRange: process.env.MAL_WARMUP_QUIET_HOURS_RANGE || '2-8',
   
   // Number of pages to warm for high-priority catalogs (default: 2)
-  priorityPages: parseInt(process.env.MAL_WARMUP_PRIORITY_PAGES) || 2,
+  priorityPages: envInt('MAL_WARMUP_PRIORITY_PAGES', 2),
   
   
   // Enable/disable specific catalog types
@@ -56,7 +58,7 @@ class MALCatalogWarmer {
       nextRun: null
     };
     this.intervalHandle = null;
-    this.log('info', `MAL Catalog Warmer initialized with config:`, {
+    this.log('debug', `MAL Catalog Warmer initialized with config:`, {
       enabled: WARMUP_CONFIG.enabled,
       intervalHours: WARMUP_CONFIG.intervalHours,
       quietHours: WARMUP_CONFIG.quietHoursEnabled ? WARMUP_CONFIG.quietHoursRange : 'disabled',
@@ -97,15 +99,32 @@ class MALCatalogWarmer {
     // Normal mode - only info and errors
     if (logLevel === 'normal' && level === 'debug') return;
     
-    const prefix = '[MAL Warmer]';
+    const write = malWarmerLogger[level === 'debug' ? 'debug' : 'info'];
     if (data) {
-      console.log(`${prefix} ${message}`, data);
+      write(message, data);
     } else {
-      console.log(`${prefix} ${message}`);
+      write(message);
     }
   }
 
+  syncConfigFromEnv() {
+    const warmupMode = process.env.CACHE_WARMUP_MODE || 'essential';
+    WARMUP_CONFIG.uuid = process.env.CACHE_WARMUP_UUID || 'system-cache-warmer';
+    WARMUP_CONFIG.enabled = process.env.MAL_WARMUP_ENABLED !== 'false' && warmupMode === 'essential';
+    WARMUP_CONFIG.intervalHours = parseInt(process.env.MAL_WARMUP_INTERVAL_HOURS) || 6;
+    WARMUP_CONFIG.taskDelayMs = envInt('MAL_WARMUP_TASK_DELAY_MS', 100);
+    WARMUP_CONFIG.quietHoursEnabled = process.env.MAL_WARMUP_QUIET_HOURS_ENABLED === 'true';
+    WARMUP_CONFIG.quietHoursRange = process.env.MAL_WARMUP_QUIET_HOURS_RANGE || '2-8';
+    WARMUP_CONFIG.priorityPages = envInt('MAL_WARMUP_PRIORITY_PAGES', 2);
+    WARMUP_CONFIG.warmPriority = process.env.MAL_WARMUP_PRIORITY !== 'false';
+    WARMUP_CONFIG.warmSchedule = process.env.MAL_WARMUP_SCHEDULE !== 'false';
+    WARMUP_CONFIG.warmDecades = process.env.MAL_WARMUP_DECADES === 'true';
+    WARMUP_CONFIG.sfw = process.env.MAL_WARMUP_SFW !== 'false';
+    WARMUP_CONFIG.logLevel = process.env.MAL_WARMUP_LOG_LEVEL || 'normal';
+  }
+
   async startBackgroundWarming() {
+    this.syncConfigFromEnv();
     if (!WARMUP_CONFIG.enabled) {
       const mode = process.env.CACHE_WARMUP_MODE || 'essential';
       this.log('info', `MAL catalog warming disabled (CACHE_WARMUP_MODE=${mode})`);
@@ -113,7 +132,7 @@ class MALCatalogWarmer {
       return;
     }
 
-    this.log('info', `Starting MAL background catalog warming (mode: ${WARMUP_MODE})...`);
+    this.log('info', `Starting MAL background catalog warming (mode: ${warmupMode()})...`);
     
     // Check if we need to warm immediately (on startup)
     const intervalMs = WARMUP_CONFIG.intervalHours * 60 * 60 * 1000;
@@ -191,19 +210,7 @@ class MALCatalogWarmer {
       return;
     }
 
-    const warmupMode = process.env.CACHE_WARMUP_MODE || 'essential';
-    WARMUP_CONFIG.uuid = process.env.CACHE_WARMUP_UUID || 'system-cache-warmer';
-    WARMUP_CONFIG.enabled = process.env.MAL_WARMUP_ENABLED !== 'false' && warmupMode === 'essential';
-    WARMUP_CONFIG.intervalHours = parseInt(process.env.MAL_WARMUP_INTERVAL_HOURS) || 6;
-    WARMUP_CONFIG.taskDelayMs = parseInt(process.env.MAL_WARMUP_TASK_DELAY_MS) || 100;
-    WARMUP_CONFIG.quietHoursEnabled = process.env.MAL_WARMUP_QUIET_HOURS_ENABLED === 'true';
-    WARMUP_CONFIG.quietHoursRange = process.env.MAL_WARMUP_QUIET_HOURS_RANGE || '2-8';
-    WARMUP_CONFIG.priorityPages = parseInt(process.env.MAL_WARMUP_PRIORITY_PAGES) || 2;
-    WARMUP_CONFIG.warmPriority = process.env.MAL_WARMUP_PRIORITY !== 'false';
-    WARMUP_CONFIG.warmSchedule = process.env.MAL_WARMUP_SCHEDULE !== 'false';
-    WARMUP_CONFIG.warmDecades = process.env.MAL_WARMUP_DECADES === 'true';
-    WARMUP_CONFIG.sfw = process.env.MAL_WARMUP_SFW !== 'false';
-    WARMUP_CONFIG.logLevel = process.env.MAL_WARMUP_LOG_LEVEL || 'normal';
+    this.syncConfigFromEnv();
 
     // Check if we're in quiet hours
     if (WARMUP_CONFIG.quietHoursEnabled) {
@@ -402,10 +409,10 @@ class MALCatalogWarmer {
             const animeResults = catalog.hasGenreId
               ? await cacheWrapJikanApi(`mal-${catalog.name}-${page}-${warmingConfig.sfw}`, async () => {
                   return await fn(...args, page, null, warmingConfig);  // Has genreId param
-                }, ttl, { skipVersion: true })
+                }, ttl)
               : await cacheWrapJikanApi(`mal-${catalog.name}-${page}-${warmingConfig.sfw}`, async () => {
                   return await fn(...args, page, warmingConfig);        // No genreId param
-                }, ttl, { skipVersion: true });
+                }, ttl);
             const metas = await parseAnimeCatalogMetaBatch(animeResults, warmingConfig, language);
             return { metas };
           }, { enableErrorCaching: false, maxRetries: 1, config: warmingConfig });
@@ -479,7 +486,7 @@ class MALCatalogWarmer {
           // getAiringSchedule(day, page, config)
           const animeResults = await cacheWrapJikanApi(`mal-schedule-${day}-1-${warmingConfig.sfw}`, async () => {
             return await jikan.getAiringSchedule(day, 1, warmingConfig);
-          }, null, { skipVersion: true });
+          }, null);
           const metas = await parseAnimeCatalogMetaBatch(animeResults, warmingConfig, language);
           return { metas };
         }, { enableErrorCaching: false, maxRetries: 1, config: warmingConfig });
@@ -552,7 +559,7 @@ class MALCatalogWarmer {
             // getTopAnimeByDateRange(startDate, endDate, page, genreId, config)
             const animeResults = await cacheWrapJikanApi(`mal-${decade.catalogId}-1-${warmingConfig.sfw}`, async () => {
               return await jikan.getTopAnimeByDateRange(decade.start, decade.end, 1, null, warmingConfig);
-            }, null, { skipVersion: true });
+            }, null);
             const metas = await parseAnimeCatalogMetaBatch(animeResults, warmingConfig, language);
             return { metas };
           }, { enableErrorCaching: false, maxRetries: 1, config: warmingConfig });
@@ -579,6 +586,7 @@ class MALCatalogWarmer {
   }
 
   getStats() {
+    this.syncConfigFromEnv();
     return {
       ...this.warmupStats,
       isWarming: this.isWarming,

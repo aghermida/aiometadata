@@ -1,19 +1,23 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import { motion } from 'framer-motion';
 import { MDBListIntegration } from './MDBListIntegration';
 import { TraktIntegration } from './TraktIntegration';
 import { SimklIntegration } from './SimklIntegration';
+import { MovieLensIntegration } from './MovieLensIntegration';
 import { PublicMetaDBIntegration } from './PublicMetaDBIntegration';
 import { TMDBIntegration } from './TMDBIntegration';
 import { DiscoverBuilderDialog } from './DiscoverBuilderDialog';
+import { CollectionBuilderDialog } from './CollectionBuilderDialog';
 import { LetterboxdIntegration } from './LetterboxdIntegration';
 import { AniListIntegration } from './AniListIntegration';
+import { MALIntegration } from './MALIntegration';
 import { CustomManifestIntegration } from './CustomManifestIntegration';
 import { StreamingTop10Integration } from './StreamingTop10Integration';
 import { AIOMetadataIntegration } from './AIOMetadataIntegration';
 import { QuickAddDialog } from '@/components/QuickAddDialog';
 import { AICatalogDialog } from '@/components/AICatalogDialog';
-import { useConfig, CatalogConfig } from '@/contexts/ConfigContext';
+import { useConfig } from '@/contexts/ConfigContext';
+import type { CatalogConfig } from '@/contexts/config';
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, TouchSensor, useSensor, useSensors, DragEndEvent } from '@dnd-kit/core';
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
@@ -24,20 +28,23 @@ import { cn } from '@/lib/utils';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Eye, EyeOff, Home, GripVertical, RefreshCw, Trash2, Pencil, Settings, ExternalLink, Star, Shuffle, Link, Wand2, Upload, Download, Trophy, Database, Copy, MoreHorizontal, Sparkles } from 'lucide-react';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogClose } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogClose, DialogDescription } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { streamingServices, regions } from "@/data/streamings";
+import { consumeCollectionBuilderRequest } from '@/lib/settingsRoute';
 import { allCatalogDefinitions } from '@/data/catalogs';
 import { GenreSelection } from '@/data/genres';
 import { SelectionProvider, useSelection } from '@/contexts/SelectionContext';
 import { BulkActionBar } from '@/components/BulkActionBar';
 import { SelectAllControl } from '@/components/SelectAllControl';
-import { SelectBySourceControl } from '@/components/SelectBySourceControl';
+import { SelectByFieldControl } from '@/components/SelectByFieldControl';
+import { SelectByTagControl } from '@/components/SelectByTagControl';
+import { CatalogTagRow } from '@/components/CatalogTagRow';
+import { TagFilterBar } from '@/components/TagFilterBar';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
-import { CatalogStarterChoice } from '@/components/CatalogStarterChoice';
 import {
   showBulkEnableSuccess,
   showBulkDisableSuccess,
@@ -55,6 +62,8 @@ interface CustomizeTemplate {
   name: string;
   formState: Record<string, any>;
 }
+
+const LARGE_LIST_THRESHOLD = 150;
 
 const DEFAULT_CATALOG_TEMPLATES: Record<string, (catalog: any) => CustomizeTemplate> = {
   'tmdb.top': (c) => ({
@@ -226,6 +235,15 @@ const TMDB_SORT_OPTIONS: { value: TMDBSortOption; label: string }[] = [
   { value: 'vote_average', label: 'Top Rated' },
   { value: 'revenue', label: 'Revenue' },
 ];
+const TMDB_MIN_VOTES_OPTIONS: { value: number; label: string }[] = [
+  { value: 0, label: 'No minimum' },
+  { value: 50, label: '50 (default)' },
+  { value: 100, label: '100' },
+  { value: 250, label: '250' },
+  { value: 500, label: '500' },
+  { value: 750, label: '750' },
+  { value: 1000, label: '1000' },
+];
 
 const TRAKT_SORT_OPTIONS: { value: TraktSortOption; label: string; vip?: boolean }[] = [
   { value: 'default', label: 'Default (Original Order)' },
@@ -270,22 +288,56 @@ const ANILIST_SORT_OPTIONS: { value: AniListSortOption; label: string }[] = [
   { value: 'PROGRESS_VOLUMES', label: 'Progress (Volumes)' },
 ];
 
-const sourceBadgeStyles = {
-  tmdb: "bg-blue-800/80 text-blue-200 border-blue-600/50 hover:bg-blue-800",
-  tvdb: "bg-green-800/80 text-green-200 border-green-600/50 hover:bg-green-800",
-  mal: "bg-indigo-800/80 text-indigo-200 border-indigo-600/50 hover:bg-indigo-800",
-  tvmaze: "bg-orange-800/80 text-orange-200 border-orange-600/50 hover:bg-orange-800",
-  mdblist: "bg-yellow-800/80 text-yellow-200 border-yellow-600/50 hover:bg-yellow-800",
-  stremthru: "bg-purple-800/80 text-purple-200 border-purple-600/50 hover:bg-purple-800",
-  custom: "bg-pink-800/80 text-pink-200 border-pink-600/50 hover:bg-pink-800",
-  trakt: "bg-red-800/80 text-red-200 border-red-600/50 hover:bg-red-800",
-  anilist: "bg-cyan-800/80 text-cyan-200 border-cyan-600/50 hover:bg-cyan-800",
-  flixpatrol: "bg-emerald-800/80 text-emerald-200 border-emerald-600/50 hover:bg-emerald-800",
-};
+function reconcileMergedReferences(catalogs: CatalogConfig[]): CatalogConfig[] {
+  const liveIdSet = new Set(catalogs.map(c => `${c.id}-${c.type}`));
 
-const sourceBadgeLabels: Record<string, string> = {
-  flixpatrol: 'TOP 10',
-};
+  // 1) For each merged catalog, prune dead source refs and decide if it survives.
+  type MergedSurvivor = { id: string; sources: NonNullable<NonNullable<CatalogConfig['metadata']>['mergedSources']> };
+  const mergedSurvivors = new Map<string, MergedSurvivor>();
+  const droppedMergedSources = new Map<string, NonNullable<NonNullable<CatalogConfig['metadata']>['mergedSources']>>();
+
+  let next: CatalogConfig[] = catalogs.map(c => {
+    if (c.source !== 'merged') return c;
+    const sources = c.metadata?.mergedSources || [];
+    const filtered = sources.filter(s => liveIdSet.has(`${s.catalogId}-${s.catalogType}`));
+    if (filtered.length >= 2) {
+      mergedSurvivors.set(c.id, { id: c.id, sources: filtered });
+      return filtered.length === sources.length
+        ? c
+        : { ...c, metadata: { ...c.metadata, mergedSources: filtered } };
+    }
+    // Doesn't survive; remember sources so we can restore them in step 3.
+    droppedMergedSources.set(c.id, filtered);
+    return c;
+  });
+
+  // 2) Drop merged catalogs that didn't survive.
+  next = next.filter(c => c.source !== 'merged' || mergedSurvivors.has(c.id));
+
+  // 3) Restore originalEnabled/originalShowInHome on sources of dropped merges,
+  //    and clear stale mergedInto flags whose target is gone.
+  next = next.map(c => {
+    if (!c.mergedInto) return c;
+    if (mergedSurvivors.has(c.mergedInto)) return c;
+
+    const dropped = droppedMergedSources.get(c.mergedInto);
+    const original = dropped?.find(s => s.catalogId === c.id && s.catalogType === c.type);
+    const { mergedInto, ...rest } = c;
+    if (original) {
+      return {
+        ...rest,
+        enabled: original.originalEnabled,
+        showInHome: original.originalShowInHome,
+      };
+    }
+    return rest;
+  });
+
+  return next;
+}
+
+import { sourceBadgeStyles, sourceBadgeLabels } from '@/lib/sourceBadges';
+import { supportsMdblistScoreFilters } from '@/utils/catalogUtils';
 
 
 
@@ -303,14 +355,19 @@ const MDBListSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: CatalogC
   const [hideWatchedTrakt, setHideWatchedTrakt] = useState<string>(catalog.metadata?.hideWatchedTrakt === true ? 'on' : catalog.metadata?.hideWatchedTrakt === false ? 'off' : 'global');
   const [hideWatchedAnilist, setHideWatchedAnilist] = useState<string>(catalog.metadata?.hideWatchedAnilist === true ? 'on' : catalog.metadata?.hideWatchedAnilist === false ? 'off' : 'global');
   const [hideWatchedMdblist, setHideWatchedMdblist] = useState<string>(catalog.metadata?.hideWatchedMdblist === true ? 'on' : catalog.metadata?.hideWatchedMdblist === false ? 'off' : 'global');
+  const [hideWatchedSimkl, setHideWatchedSimkl] = useState<string>(catalog.metadata?.hideWatchedSimkl === true ? 'on' : catalog.metadata?.hideWatchedSimkl === false ? 'off' : 'global');
+  const [hideUnreleasedDigital, setHideUnreleasedDigital] = useState<string>(catalog.metadata?.hideUnreleasedDigital === true ? 'on' : catalog.metadata?.hideUnreleasedDigital === false ? 'off' : 'global');
   const isUpNext = catalog.id === 'mdblist.upnext';
   const isDiscover = catalog.id.startsWith('mdblist.discover.');
   const showSortOptions = !isUpNext && !isDiscover;
+  const showScoreFilters = supportsMdblistScoreFilters(catalog);
 
   const handleSave = () => {
     const hideTraktValue = hideWatchedTrakt === 'on' ? true : hideWatchedTrakt === 'off' ? false : undefined;
     const hideAnilistValue = hideWatchedAnilist === 'on' ? true : hideWatchedAnilist === 'off' ? false : undefined;
     const hideMdblistValue = hideWatchedMdblist === 'on' ? true : hideWatchedMdblist === 'off' ? false : undefined;
+    const hideSimklValue = hideWatchedSimkl === 'on' ? true : hideWatchedSimkl === 'off' ? false : undefined;
+    const hideUnreleasedDigitalValue = hideUnreleasedDigital === 'on' ? true : hideUnreleasedDigital === 'off' ? false : undefined;
     setConfig(prev => ({
       ...prev,
       catalogs: prev.catalogs.map(c =>
@@ -333,7 +390,9 @@ const MDBListSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: CatalogC
               }),
               hideWatchedTrakt: hideTraktValue,
               hideWatchedAnilist: hideAnilistValue,
-              hideWatchedMdblist: hideMdblistValue
+              hideWatchedMdblist: hideMdblistValue,
+              hideWatchedSimkl: hideSimklValue,
+              hideUnreleasedDigital: hideUnreleasedDigitalValue
             }
           }
           : c
@@ -420,7 +479,7 @@ const MDBListSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: CatalogC
               </div>
             </>
           )}
-          {catalog.source === 'mdblist' && catalog.sourceUrl?.includes('/external/lists/') && (
+          {showScoreFilters && (
             <>
               <div className="space-y-2">
                 <Label>Minimum Score</Label>
@@ -444,6 +503,10 @@ const MDBListSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: CatalogC
                   max="100"
                 />
               </div>
+              <p className="text-xs text-muted-foreground">
+                Filters the list by MDBList score. Requires an MDBList supporter account.
+                Leave both blank otherwise.
+              </p>
             </>
           )}
           {isDiscover ? (
@@ -554,6 +617,34 @@ const MDBListSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: CatalogC
               </Select>
             </div>
           )}
+          {config.apiKeys?.simklTokenId && (
+            <div className="space-y-2">
+              <Label>Hide Simkl Watched</Label>
+              <Select value={hideWatchedSimkl} onValueChange={setHideWatchedSimkl}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="global">Use Global Setting</SelectItem>
+                  <SelectItem value="on">Always On</SelectItem>
+                  <SelectItem value="off">Always Off</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+          <div className="space-y-2">
+            <Label>Hide Unreleased Movies</Label>
+            <Select value={hideUnreleasedDigital} onValueChange={setHideUnreleasedDigital}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="global">Use Global Setting</SelectItem>
+                <SelectItem value="on">Always On</SelectItem>
+                <SelectItem value="off">Always Off</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
         <div className="text-xs text-muted-foreground mb-4">
           Note: Changes will take effect after you save your configuration in the Configuration Manager.
@@ -576,6 +667,8 @@ const TraktSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: CatalogCon
   const [hideWatchedTrakt, setHideWatchedTrakt] = useState<string>(catalog.metadata?.hideWatchedTrakt === true ? 'on' : catalog.metadata?.hideWatchedTrakt === false ? 'off' : 'global');
   const [hideWatchedAnilist, setHideWatchedAnilist] = useState<string>(catalog.metadata?.hideWatchedAnilist === true ? 'on' : catalog.metadata?.hideWatchedAnilist === false ? 'off' : 'global');
   const [hideWatchedMdblist, setHideWatchedMdblist] = useState<string>(catalog.metadata?.hideWatchedMdblist === true ? 'on' : catalog.metadata?.hideWatchedMdblist === false ? 'off' : 'global');
+  const [hideWatchedSimkl, setHideWatchedSimkl] = useState<string>(catalog.metadata?.hideWatchedSimkl === true ? 'on' : catalog.metadata?.hideWatchedSimkl === false ? 'off' : 'global');
+  const [hideUnreleasedDigital, setHideUnreleasedDigital] = useState<string>(catalog.metadata?.hideUnreleasedDigital === true ? 'on' : catalog.metadata?.hideUnreleasedDigital === false ? 'off' : 'global');
   const [airingSoonDays, setAiringSoonDays] = useState<number>(() => {
     const days = catalog.metadata?.airingSoonDays;
     if (typeof days === 'number' && days >= 1 && days <= 7) {
@@ -593,6 +686,8 @@ const TraktSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: CatalogCon
     const hideTraktValue = hideWatchedTrakt === 'on' ? true : hideWatchedTrakt === 'off' ? false : undefined;
     const hideAnilistValue = hideWatchedAnilist === 'on' ? true : hideWatchedAnilist === 'off' ? false : undefined;
     const hideMdblistValue = hideWatchedMdblist === 'on' ? true : hideWatchedMdblist === 'off' ? false : undefined;
+    const hideSimklValue = hideWatchedSimkl === 'on' ? true : hideWatchedSimkl === 'off' ? false : undefined;
+    const hideUnreleasedDigitalValue = hideUnreleasedDigital === 'on' ? true : hideUnreleasedDigital === 'off' ? false : undefined;
     setConfig(prev => {
       const updatedCatalogs = prev.catalogs.map(c =>
         c.id === catalog.id && c.type === catalog.type
@@ -609,7 +704,9 @@ const TraktSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: CatalogCon
                 }),
                 hideWatchedTrakt: hideTraktValue,
                 hideWatchedAnilist: hideAnilistValue,
-                hideWatchedMdblist: hideMdblistValue
+                hideWatchedMdblist: hideMdblistValue,
+                hideWatchedSimkl: hideSimklValue,
+                hideUnreleasedDigital: hideUnreleasedDigitalValue
               }
             }
           : c
@@ -771,6 +868,34 @@ const TraktSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: CatalogCon
               </Select>
             </div>
           )}
+          {config.apiKeys?.simklTokenId && (
+            <div className="space-y-2">
+              <Label>Hide Simkl Watched</Label>
+              <Select value={hideWatchedSimkl} onValueChange={setHideWatchedSimkl}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="global">Use Global Setting</SelectItem>
+                  <SelectItem value="on">Always On</SelectItem>
+                  <SelectItem value="off">Always Off</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+          <div className="space-y-2">
+            <Label>Hide Unreleased Movies</Label>
+            <Select value={hideUnreleasedDigital} onValueChange={setHideUnreleasedDigital}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="global">Use Global Setting</SelectItem>
+                <SelectItem value="on">Always On</SelectItem>
+                <SelectItem value="off">Always Off</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
         <div className="flex justify-end gap-2 pt-2">
           <DialogClose asChild>
@@ -793,6 +918,8 @@ const SimklSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: CatalogCon
   const [hideWatchedTrakt, setHideWatchedTrakt] = useState<string>(catalog.metadata?.hideWatchedTrakt === true ? 'on' : catalog.metadata?.hideWatchedTrakt === false ? 'off' : 'global');
   const [hideWatchedAnilist, setHideWatchedAnilist] = useState<string>(catalog.metadata?.hideWatchedAnilist === true ? 'on' : catalog.metadata?.hideWatchedAnilist === false ? 'off' : 'global');
   const [hideWatchedMdblist, setHideWatchedMdblist] = useState<string>(catalog.metadata?.hideWatchedMdblist === true ? 'on' : catalog.metadata?.hideWatchedMdblist === false ? 'off' : 'global');
+  const [hideWatchedSimkl, setHideWatchedSimkl] = useState<string>(catalog.metadata?.hideWatchedSimkl === true ? 'on' : catalog.metadata?.hideWatchedSimkl === false ? 'off' : 'global');
+  const [hideUnreleasedDigital, setHideUnreleasedDigital] = useState<string>(catalog.metadata?.hideUnreleasedDigital === true ? 'on' : catalog.metadata?.hideUnreleasedDigital === false ? 'off' : 'global');
   const [airingSoonDays, setAiringSoonDays] = useState<number>(() => {
     const days = catalog.metadata?.airingSoonDays;
     if (typeof days === 'number' && days >= 1 && days <= 7) {
@@ -807,6 +934,8 @@ const SimklSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: CatalogCon
     const hideTraktValue = hideWatchedTrakt === 'on' ? true : hideWatchedTrakt === 'off' ? false : undefined;
     const hideAnilistValue = hideWatchedAnilist === 'on' ? true : hideWatchedAnilist === 'off' ? false : undefined;
     const hideMdblistValue = hideWatchedMdblist === 'on' ? true : hideWatchedMdblist === 'off' ? false : undefined;
+    const hideSimklValue = hideWatchedSimkl === 'on' ? true : hideWatchedSimkl === 'off' ? false : undefined;
+    const hideUnreleasedDigitalValue = hideUnreleasedDigital === 'on' ? true : hideUnreleasedDigital === 'off' ? false : undefined;
     setConfig(prev => {
       const updatedCatalogs = prev.catalogs.map(c =>
         c.id === catalog.id && c.type === catalog.type
@@ -823,7 +952,9 @@ const SimklSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: CatalogCon
                 ...(isCalendar && { airingSoonDays: Math.max(1, Math.min(7, airingSoonDays)) }),
                 hideWatchedTrakt: hideTraktValue,
                 hideWatchedAnilist: hideAnilistValue,
-                hideWatchedMdblist: hideMdblistValue
+                hideWatchedMdblist: hideMdblistValue,
+                hideWatchedSimkl: hideSimklValue,
+                hideUnreleasedDigital: hideUnreleasedDigitalValue
               }
             }
           : c
@@ -955,11 +1086,188 @@ const SimklSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: CatalogCon
               </Select>
             </div>
           )}
+          {config.apiKeys?.simklTokenId && (
+            <div className="space-y-2">
+              <Label>Hide Simkl Watched</Label>
+              <Select value={hideWatchedSimkl} onValueChange={setHideWatchedSimkl}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="global">Use Global Setting</SelectItem>
+                  <SelectItem value="on">Always On</SelectItem>
+                  <SelectItem value="off">Always Off</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+          <div className="space-y-2">
+            <Label>Hide Unreleased Movies</Label>
+            <Select value={hideUnreleasedDigital} onValueChange={setHideUnreleasedDigital}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="global">Use Global Setting</SelectItem>
+                <SelectItem value="on">Always On</SelectItem>
+                <SelectItem value="off">Always Off</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
         <div className="flex justify-end gap-2 pt-2">
           <DialogClose asChild>
             <Button variant="ghost">Cancel</Button>
           </DialogClose>
+          <Button onClick={handleSave}>Save</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+const MOVIELENS_SORT_OPTIONS = [
+  { value: 'prediction', label: 'Prediction (personalized)' },
+  { value: 'popularity', label: 'Popularity' },
+  { value: 'avgRating', label: 'Average Rating' },
+  { value: 'releaseDate', label: 'Release Date' },
+  { value: 'dateAdded', label: 'Date Added' },
+  { value: 'title', label: 'Title (A-Z)' },
+  { value: 'userRating', label: 'Your Rating' },
+  { value: 'userRatedDate', label: 'Your Rating Date' },
+];
+
+const MovieLensSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: CatalogConfig, isOpen: boolean, onClose: () => void }) => {
+  const { setConfig, catalogTTL } = useConfig();
+  const [cacheTTL, setCacheTTL] = useState<number>(catalog.cacheTTL || catalogTTL);
+  const isWatchlist = catalog.id === 'movielens.watchlist' || catalog.id.startsWith('movielens.list.');
+  const savedSort = catalog.metadata?.sortBy;
+  const [sortBy, setSortBy] = useState<string>(
+    MOVIELENS_SORT_OPTIONS.some(o => o.value === savedSort) ? savedSort! : 'prediction'
+  );
+  const [sortDirection, setSortDirection] = useState<string>(catalog.metadata?.sortDirection || 'default');
+  const [tags, setTags] = useState<string>(catalog.metadata?.tags || '');
+  const [minYear, setMinYear] = useState<string>(catalog.metadata?.minYear ? String(catalog.metadata.minYear) : '');
+  const [maxYear, setMaxYear] = useState<string>(catalog.metadata?.maxYear ? String(catalog.metadata.maxYear) : '');
+  const [includeRated, setIncludeRated] = useState<boolean>(catalog.metadata?.includeRated === true);
+  const [maxDaysAgo, setMaxDaysAgo] = useState<string>(catalog.metadata?.maxDaysAgo ? String(catalog.metadata.maxDaysAgo) : '');
+
+  const handleSave = () => {
+    const minYearNum = parseInt(minYear, 10);
+    const maxYearNum = parseInt(maxYear, 10);
+    const maxDaysAgoNum = parseInt(maxDaysAgo, 10);
+    setConfig(prev => ({
+      ...prev,
+      catalogs: prev.catalogs.map(c =>
+        c.id === catalog.id && c.type === catalog.type
+          ? {
+              ...c,
+              cacheTTL: Math.max(cacheTTL, 300),
+              metadata: {
+                ...c.metadata,
+                ...(!isWatchlist && {
+                  sortBy: sortBy !== 'prediction' ? sortBy : undefined,
+                  sortDirection: sortDirection !== 'default' ? sortDirection : undefined,
+                  tags: tags.trim() ? tags.trim() : undefined,
+                  minYear: Number.isFinite(minYearNum) ? minYearNum : undefined,
+                  maxYear: Number.isFinite(maxYearNum) ? maxYearNum : undefined,
+                  includeRated: includeRated ? true : undefined,
+                  maxDaysAgo: Number.isFinite(maxDaysAgoNum) && maxDaysAgoNum > 0 ? maxDaysAgoNum : undefined,
+                }),
+              },
+            }
+          : c
+      ) as CatalogConfig[],
+    }));
+    onClose();
+  };
+
+  return (
+    <Dialog open={isOpen} onOpenChange={onClose}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>MovieLens Settings</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4 py-4">
+          {!isWatchlist && (
+            <>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-2">
+                  <Label>Sort By</Label>
+                  <Select value={sortBy} onValueChange={setSortBy}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {MOVIELENS_SORT_OPTIONS.map(o => (
+                        <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label>Direction</Label>
+                  <Select value={sortDirection} onValueChange={setSortDirection}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="default">Default (descending)</SelectItem>
+                      <SelectItem value="asc">Ascending</SelectItem>
+                      <SelectItem value="desc">Descending</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label>Tags</Label>
+                <Input placeholder="e.g. classic, dark humor, mythology" value={tags} onChange={(e) => setTags(e.target.value)} />
+                <p className="text-xs text-muted-foreground">
+                  Comma-separated MovieLens tags; results match any one of them
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-2">
+                  <Label>Min Year</Label>
+                  <Input type="number" placeholder="e.g. 2010" value={minYear} onChange={(e) => setMinYear(e.target.value)} />
+                </div>
+                <div className="space-y-2">
+                  <Label>Max Year</Label>
+                  <Input type="number" placeholder="e.g. 2026" value={maxYear} onChange={(e) => setMaxYear(e.target.value)} />
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label>Released Within (days)</Label>
+                <Input type="number" min={1} placeholder="e.g. 180" value={maxDaysAgo} onChange={(e) => setMaxDaysAgo(e.target.value)} />
+                <p className="text-xs text-muted-foreground">
+                  Rolling recency window, e.g. 180 for the last 6 months or 730 for the last 2 years. Leave blank for no limit.
+                  Combines with the year filters above, so an old Max Year will empty the catalog.
+                </p>
+              </div>
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <Label>Include Rated Movies</Label>
+                  <p className="text-xs text-muted-foreground">Show movies you've already rated on MovieLens</p>
+                </div>
+                <Switch checked={includeRated} onCheckedChange={setIncludeRated} />
+              </div>
+            </>
+          )}
+          <div className="space-y-2">
+            <Label>Cache TTL (seconds)</Label>
+            <Input
+              type="number"
+              min={300}
+              value={cacheTTL}
+              onChange={(e) => setCacheTTL(Number(e.target.value) || 0)}
+            />
+            <p className="text-xs text-muted-foreground">
+              Minimum 5 minutes ({Math.floor(cacheTTL / 3600)}h {Math.floor((cacheTTL % 3600) / 60)}m)
+            </p>
+          </div>
+        </div>
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
           <Button onClick={handleSave}>Save</Button>
         </div>
       </DialogContent>
@@ -974,16 +1282,20 @@ const LetterboxdSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: Catal
   const [hideWatchedTrakt, setHideWatchedTrakt] = useState<string>(catalog.metadata?.hideWatchedTrakt === true ? 'on' : catalog.metadata?.hideWatchedTrakt === false ? 'off' : 'global');
   const [hideWatchedAnilist, setHideWatchedAnilist] = useState<string>(catalog.metadata?.hideWatchedAnilist === true ? 'on' : catalog.metadata?.hideWatchedAnilist === false ? 'off' : 'global');
   const [hideWatchedMdblist, setHideWatchedMdblist] = useState<string>(catalog.metadata?.hideWatchedMdblist === true ? 'on' : catalog.metadata?.hideWatchedMdblist === false ? 'off' : 'global');
+  const [hideWatchedSimkl, setHideWatchedSimkl] = useState<string>(catalog.metadata?.hideWatchedSimkl === true ? 'on' : catalog.metadata?.hideWatchedSimkl === false ? 'off' : 'global');
+  const [hideUnreleasedDigital, setHideUnreleasedDigital] = useState<string>(catalog.metadata?.hideUnreleasedDigital === true ? 'on' : catalog.metadata?.hideUnreleasedDigital === false ? 'off' : 'global');
 
   const handleSave = () => {
     const hideTraktValue = hideWatchedTrakt === 'on' ? true : hideWatchedTrakt === 'off' ? false : undefined;
     const hideAnilistValue = hideWatchedAnilist === 'on' ? true : hideWatchedAnilist === 'off' ? false : undefined;
     const hideMdblistValue = hideWatchedMdblist === 'on' ? true : hideWatchedMdblist === 'off' ? false : undefined;
+    const hideSimklValue = hideWatchedSimkl === 'on' ? true : hideWatchedSimkl === 'off' ? false : undefined;
+    const hideUnreleasedDigitalValue = hideUnreleasedDigital === 'on' ? true : hideUnreleasedDigital === 'off' ? false : undefined;
     setConfig(prev => ({
       ...prev,
       catalogs: prev.catalogs.map(c =>
         c.id === catalog.id && c.type === catalog.type
-          ? { ...c, cacheTTL: Math.max(cacheTTL, 7200), enableRatingPosters, metadata: { ...c.metadata, hideWatchedTrakt: hideTraktValue, hideWatchedAnilist: hideAnilistValue, hideWatchedMdblist: hideMdblistValue } }
+          ? { ...c, cacheTTL: Math.max(cacheTTL, 7200), enableRatingPosters, metadata: { ...c.metadata, hideWatchedTrakt: hideTraktValue, hideWatchedAnilist: hideAnilistValue, hideWatchedMdblist: hideMdblistValue, hideWatchedSimkl: hideSimklValue, hideUnreleasedDigital: hideUnreleasedDigitalValue } }
           : c
       )
     }));
@@ -1075,6 +1387,34 @@ const LetterboxdSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: Catal
               </Select>
             </div>
           )}
+          {config.apiKeys?.simklTokenId && (
+            <div className="space-y-2">
+              <Label>Hide Simkl Watched</Label>
+              <Select value={hideWatchedSimkl} onValueChange={setHideWatchedSimkl}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="global">Use Global Setting</SelectItem>
+                  <SelectItem value="on">Always On</SelectItem>
+                  <SelectItem value="off">Always Off</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+          <div className="space-y-2">
+            <Label>Hide Unreleased Movies</Label>
+            <Select value={hideUnreleasedDigital} onValueChange={setHideUnreleasedDigital}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="global">Use Global Setting</SelectItem>
+                <SelectItem value="on">Always On</SelectItem>
+                <SelectItem value="off">Always Off</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
         <div className="flex justify-end space-x-2">
           <Button variant="outline" onClick={onClose}>Cancel</Button>
@@ -1095,19 +1435,25 @@ const TMDBSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: CatalogConf
 
   const [sort, setSort] = useState<TMDBSortOption>(initialSort);
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>((catalog.sortDirection as 'asc' | 'desc') || 'desc');
+  const [minVotes, setMinVotes] = useState<number>(catalog.minVotes ?? 50);
+  const supportsMinVotes = catalog.id === 'tmdb.year';
   const [hideWatchedTrakt, setHideWatchedTrakt] = useState<string>(catalog.metadata?.hideWatchedTrakt === true ? 'on' : catalog.metadata?.hideWatchedTrakt === false ? 'off' : 'global');
   const [hideWatchedAnilist, setHideWatchedAnilist] = useState<string>(catalog.metadata?.hideWatchedAnilist === true ? 'on' : catalog.metadata?.hideWatchedAnilist === false ? 'off' : 'global');
   const [hideWatchedMdblist, setHideWatchedMdblist] = useState<string>(catalog.metadata?.hideWatchedMdblist === true ? 'on' : catalog.metadata?.hideWatchedMdblist === false ? 'off' : 'global');
+  const [hideWatchedSimkl, setHideWatchedSimkl] = useState<string>(catalog.metadata?.hideWatchedSimkl === true ? 'on' : catalog.metadata?.hideWatchedSimkl === false ? 'off' : 'global');
+  const [hideUnreleasedDigital, setHideUnreleasedDigital] = useState<string>(catalog.metadata?.hideUnreleasedDigital === true ? 'on' : catalog.metadata?.hideUnreleasedDigital === false ? 'off' : 'global');
 
   const handleSave = () => {
     const hideTraktValue = hideWatchedTrakt === 'on' ? true : hideWatchedTrakt === 'off' ? false : undefined;
     const hideAnilistValue = hideWatchedAnilist === 'on' ? true : hideWatchedAnilist === 'off' ? false : undefined;
     const hideMdblistValue = hideWatchedMdblist === 'on' ? true : hideWatchedMdblist === 'off' ? false : undefined;
+    const hideSimklValue = hideWatchedSimkl === 'on' ? true : hideWatchedSimkl === 'off' ? false : undefined;
+    const hideUnreleasedDigitalValue = hideUnreleasedDigital === 'on' ? true : hideUnreleasedDigital === 'off' ? false : undefined;
     setConfig(prev => ({
       ...prev,
       catalogs: prev.catalogs.map(c =>
         c.id === catalog.id && c.type === catalog.type
-          ? { ...c, sort, sortDirection, metadata: { ...c.metadata, hideWatchedTrakt: hideTraktValue, hideWatchedAnilist: hideAnilistValue, hideWatchedMdblist: hideMdblistValue } }
+          ? { ...c, sort, sortDirection, ...(supportsMinVotes ? { minVotes } : {}), metadata: { ...c.metadata, hideWatchedTrakt: hideTraktValue, hideWatchedAnilist: hideAnilistValue, hideWatchedMdblist: hideMdblistValue, hideWatchedSimkl: hideSimklValue, hideUnreleasedDigital: hideUnreleasedDigitalValue } }
           : c
       )
     }));
@@ -1148,6 +1494,26 @@ const TMDBSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: CatalogConf
               </SelectContent>
             </Select>
           </div>
+          {supportsMinVotes && (
+            <div className="space-y-2">
+              <Label>Minimum Votes</Label>
+              <Select value={String(minVotes)} onValueChange={(value) => setMinVotes(parseInt(value, 10))}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {TMDB_MIN_VOTES_OPTIONS.map(option => (
+                    <SelectItem key={option.value} value={String(option.value)}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Hide titles with fewer than this many TMDB votes. Higher values reduce obscure entries.
+              </p>
+            </div>
+          )}
           {config.apiKeys?.traktTokenId && (
             <div className="space-y-2">
               <Label>Hide Trakt Watched</Label>
@@ -1193,6 +1559,34 @@ const TMDBSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: CatalogConf
               </Select>
             </div>
           )}
+          {config.apiKeys?.simklTokenId && (
+            <div className="space-y-2">
+              <Label>Hide Simkl Watched</Label>
+              <Select value={hideWatchedSimkl} onValueChange={setHideWatchedSimkl}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="global">Use Global Setting</SelectItem>
+                  <SelectItem value="on">Always On</SelectItem>
+                  <SelectItem value="off">Always Off</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+          <div className="space-y-2">
+            <Label>Hide Unreleased Movies</Label>
+            <Select value={hideUnreleasedDigital} onValueChange={setHideUnreleasedDigital}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="global">Use Global Setting</SelectItem>
+                <SelectItem value="on">Always On</SelectItem>
+                <SelectItem value="off">Always Off</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
         <div className="flex justify-end gap-2 pt-2">
           <DialogClose asChild>
@@ -1212,16 +1606,20 @@ const CustomManifestSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: C
   const [hideWatchedTrakt, setHideWatchedTrakt] = useState<string>(catalog.metadata?.hideWatchedTrakt === true ? 'on' : catalog.metadata?.hideWatchedTrakt === false ? 'off' : 'global');
   const [hideWatchedAnilist, setHideWatchedAnilist] = useState<string>(catalog.metadata?.hideWatchedAnilist === true ? 'on' : catalog.metadata?.hideWatchedAnilist === false ? 'off' : 'global');
   const [hideWatchedMdblist, setHideWatchedMdblist] = useState<string>(catalog.metadata?.hideWatchedMdblist === true ? 'on' : catalog.metadata?.hideWatchedMdblist === false ? 'off' : 'global');
+  const [hideWatchedSimkl, setHideWatchedSimkl] = useState<string>(catalog.metadata?.hideWatchedSimkl === true ? 'on' : catalog.metadata?.hideWatchedSimkl === false ? 'off' : 'global');
+  const [hideUnreleasedDigital, setHideUnreleasedDigital] = useState<string>(catalog.metadata?.hideUnreleasedDigital === true ? 'on' : catalog.metadata?.hideUnreleasedDigital === false ? 'off' : 'global');
 
   const handleSave = () => {
     const hideTraktValue = hideWatchedTrakt === 'on' ? true : hideWatchedTrakt === 'off' ? false : undefined;
     const hideAnilistValue = hideWatchedAnilist === 'on' ? true : hideWatchedAnilist === 'off' ? false : undefined;
     const hideMdblistValue = hideWatchedMdblist === 'on' ? true : hideWatchedMdblist === 'off' ? false : undefined;
+    const hideSimklValue = hideWatchedSimkl === 'on' ? true : hideWatchedSimkl === 'off' ? false : undefined;
+    const hideUnreleasedDigitalValue = hideUnreleasedDigital === 'on' ? true : hideUnreleasedDigital === 'off' ? false : undefined;
     setConfig(prev => ({
       ...prev,
       catalogs: prev.catalogs.map(c =>
         c.id === catalog.id && c.type === catalog.type
-          ? { ...c, cacheTTL: Math.max(cacheTTL, 300), enableRatingPosters, metadata: { ...c.metadata, hideWatchedTrakt: hideTraktValue, hideWatchedAnilist: hideAnilistValue, hideWatchedMdblist: hideMdblistValue } }
+          ? { ...c, cacheTTL: Math.max(cacheTTL, 300), enableRatingPosters, metadata: { ...c.metadata, hideWatchedTrakt: hideTraktValue, hideWatchedAnilist: hideAnilistValue, hideWatchedMdblist: hideMdblistValue, hideWatchedSimkl: hideSimklValue, hideUnreleasedDigital: hideUnreleasedDigitalValue } }
           : c
       )
     }));
@@ -1319,6 +1717,34 @@ const CustomManifestSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: C
               </Select>
             </div>
           )}
+          {config.apiKeys?.simklTokenId && (
+            <div className="space-y-2">
+              <Label>Hide Simkl Watched</Label>
+              <Select value={hideWatchedSimkl} onValueChange={setHideWatchedSimkl}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="global">Use Global Setting</SelectItem>
+                  <SelectItem value="on">Always On</SelectItem>
+                  <SelectItem value="off">Always Off</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+          <div className="space-y-2">
+            <Label>Hide Unreleased Movies</Label>
+            <Select value={hideUnreleasedDigital} onValueChange={setHideUnreleasedDigital}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="global">Use Global Setting</SelectItem>
+                <SelectItem value="on">Always On</SelectItem>
+                <SelectItem value="off">Always Off</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
         <div className="flex justify-end space-x-2">
           <Button variant="outline" onClick={onClose}>Cancel</Button>
@@ -1337,16 +1763,20 @@ const AniListSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: CatalogC
   const [hideWatchedTrakt, setHideWatchedTrakt] = useState<string>(catalog.metadata?.hideWatchedTrakt === true ? 'on' : catalog.metadata?.hideWatchedTrakt === false ? 'off' : 'global');
   const [hideWatchedAnilist, setHideWatchedAnilist] = useState<string>(catalog.metadata?.hideWatchedAnilist === true ? 'on' : catalog.metadata?.hideWatchedAnilist === false ? 'off' : 'global');
   const [hideWatchedMdblist, setHideWatchedMdblist] = useState<string>(catalog.metadata?.hideWatchedMdblist === true ? 'on' : catalog.metadata?.hideWatchedMdblist === false ? 'off' : 'global');
+  const [hideWatchedSimkl, setHideWatchedSimkl] = useState<string>(catalog.metadata?.hideWatchedSimkl === true ? 'on' : catalog.metadata?.hideWatchedSimkl === false ? 'off' : 'global');
+  const [hideUnreleasedDigital, setHideUnreleasedDigital] = useState<string>(catalog.metadata?.hideUnreleasedDigital === true ? 'on' : catalog.metadata?.hideUnreleasedDigital === false ? 'off' : 'global');
 
   const handleSave = () => {
     const hideTraktValue = hideWatchedTrakt === 'on' ? true : hideWatchedTrakt === 'off' ? false : undefined;
     const hideAnilistValue = hideWatchedAnilist === 'on' ? true : hideWatchedAnilist === 'off' ? false : undefined;
     const hideMdblistValue = hideWatchedMdblist === 'on' ? true : hideWatchedMdblist === 'off' ? false : undefined;
+    const hideSimklValue = hideWatchedSimkl === 'on' ? true : hideWatchedSimkl === 'off' ? false : undefined;
+    const hideUnreleasedDigitalValue = hideUnreleasedDigital === 'on' ? true : hideUnreleasedDigital === 'off' ? false : undefined;
     setConfig(prev => ({
       ...prev,
       catalogs: prev.catalogs.map(c =>
         c.id === catalog.id && c.type === catalog.type
-          ? { ...c, sort, sortDirection, cacheTTL: Math.max(cacheTTL, 300), metadata: { ...c.metadata, hideWatchedTrakt: hideTraktValue, hideWatchedAnilist: hideAnilistValue, hideWatchedMdblist: hideMdblistValue } }
+          ? { ...c, sort, sortDirection, cacheTTL: Math.max(cacheTTL, 300), metadata: { ...c.metadata, hideWatchedTrakt: hideTraktValue, hideWatchedAnilist: hideAnilistValue, hideWatchedMdblist: hideMdblistValue, hideWatchedSimkl: hideSimklValue, hideUnreleasedDigital: hideUnreleasedDigitalValue } }
           : c
       )
     }));
@@ -1454,6 +1884,34 @@ const AniListSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: CatalogC
               </Select>
             </div>
           )}
+          {config.apiKeys?.simklTokenId && (
+            <div className="space-y-2">
+              <Label>Hide Simkl Watched</Label>
+              <Select value={hideWatchedSimkl} onValueChange={setHideWatchedSimkl}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="global">Use Global Setting</SelectItem>
+                  <SelectItem value="on">Always On</SelectItem>
+                  <SelectItem value="off">Always Off</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+          <div className="space-y-2">
+            <Label>Hide Unreleased Movies</Label>
+            <Select value={hideUnreleasedDigital} onValueChange={setHideUnreleasedDigital}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="global">Use Global Setting</SelectItem>
+                <SelectItem value="on">Always On</SelectItem>
+                <SelectItem value="off">Always Off</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
         <div className="text-xs text-muted-foreground mb-4">
           Note: Changes will take effect after you save your configuration in the Configuration Manager.
@@ -1480,16 +1938,20 @@ const StreamingSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: Catalo
   const [hideWatchedTrakt, setHideWatchedTrakt] = useState<string>(catalog.metadata?.hideWatchedTrakt === true ? 'on' : catalog.metadata?.hideWatchedTrakt === false ? 'off' : 'global');
   const [hideWatchedAnilist, setHideWatchedAnilist] = useState<string>(catalog.metadata?.hideWatchedAnilist === true ? 'on' : catalog.metadata?.hideWatchedAnilist === false ? 'off' : 'global');
   const [hideWatchedMdblist, setHideWatchedMdblist] = useState<string>(catalog.metadata?.hideWatchedMdblist === true ? 'on' : catalog.metadata?.hideWatchedMdblist === false ? 'off' : 'global');
+  const [hideWatchedSimkl, setHideWatchedSimkl] = useState<string>(catalog.metadata?.hideWatchedSimkl === true ? 'on' : catalog.metadata?.hideWatchedSimkl === false ? 'off' : 'global');
+  const [hideUnreleasedDigital, setHideUnreleasedDigital] = useState<string>(catalog.metadata?.hideUnreleasedDigital === true ? 'on' : catalog.metadata?.hideUnreleasedDigital === false ? 'off' : 'global');
 
   const handleSave = () => {
     const hideTraktValue = hideWatchedTrakt === 'on' ? true : hideWatchedTrakt === 'off' ? false : undefined;
     const hideAnilistValue = hideWatchedAnilist === 'on' ? true : hideWatchedAnilist === 'off' ? false : undefined;
     const hideMdblistValue = hideWatchedMdblist === 'on' ? true : hideWatchedMdblist === 'off' ? false : undefined;
+    const hideSimklValue = hideWatchedSimkl === 'on' ? true : hideWatchedSimkl === 'off' ? false : undefined;
+    const hideUnreleasedDigitalValue = hideUnreleasedDigital === 'on' ? true : hideUnreleasedDigital === 'off' ? false : undefined;
     setConfig(prev => ({
       ...prev,
       catalogs: prev.catalogs.map(c =>
         c.id === catalog.id && c.type === catalog.type
-          ? { ...c, sort, sortDirection, metadata: { ...c.metadata, hideWatchedTrakt: hideTraktValue, hideWatchedAnilist: hideAnilistValue, hideWatchedMdblist: hideMdblistValue } }
+          ? { ...c, sort, sortDirection, metadata: { ...c.metadata, hideWatchedTrakt: hideTraktValue, hideWatchedAnilist: hideAnilistValue, hideWatchedMdblist: hideMdblistValue, hideWatchedSimkl: hideSimklValue, hideUnreleasedDigital: hideUnreleasedDigitalValue } }
           : c
       )
     }));
@@ -1575,6 +2037,34 @@ const StreamingSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: Catalo
               </Select>
             </div>
           )}
+          {config.apiKeys?.simklTokenId && (
+            <div className="space-y-2">
+              <Label>Hide Simkl Watched</Label>
+              <Select value={hideWatchedSimkl} onValueChange={setHideWatchedSimkl}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="global">Use Global Setting</SelectItem>
+                  <SelectItem value="on">Always On</SelectItem>
+                  <SelectItem value="off">Always Off</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+          <div className="space-y-2">
+            <Label>Hide Unreleased Movies</Label>
+            <Select value={hideUnreleasedDigital} onValueChange={setHideUnreleasedDigital}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="global">Use Global Setting</SelectItem>
+                <SelectItem value="on">Always On</SelectItem>
+                <SelectItem value="off">Always Off</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
         <div className="flex justify-end gap-2 pt-2">
           <DialogClose asChild>
@@ -1596,16 +2086,20 @@ const PMDBSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: CatalogConf
   const [hideWatchedTrakt, setHideWatchedTrakt] = useState<string>(catalog.metadata?.hideWatchedTrakt === true ? 'on' : catalog.metadata?.hideWatchedTrakt === false ? 'off' : 'global');
   const [hideWatchedAnilist, setHideWatchedAnilist] = useState<string>(catalog.metadata?.hideWatchedAnilist === true ? 'on' : catalog.metadata?.hideWatchedAnilist === false ? 'off' : 'global');
   const [hideWatchedMdblist, setHideWatchedMdblist] = useState<string>(catalog.metadata?.hideWatchedMdblist === true ? 'on' : catalog.metadata?.hideWatchedMdblist === false ? 'off' : 'global');
+  const [hideWatchedSimkl, setHideWatchedSimkl] = useState<string>(catalog.metadata?.hideWatchedSimkl === true ? 'on' : catalog.metadata?.hideWatchedSimkl === false ? 'off' : 'global');
+  const [hideUnreleasedDigital, setHideUnreleasedDigital] = useState<string>(catalog.metadata?.hideUnreleasedDigital === true ? 'on' : catalog.metadata?.hideUnreleasedDigital === false ? 'off' : 'global');
 
   const handleSave = () => {
     const hideTraktValue = hideWatchedTrakt === 'on' ? true : hideWatchedTrakt === 'off' ? false : undefined;
     const hideAnilistValue = hideWatchedAnilist === 'on' ? true : hideWatchedAnilist === 'off' ? false : undefined;
     const hideMdblistValue = hideWatchedMdblist === 'on' ? true : hideWatchedMdblist === 'off' ? false : undefined;
+    const hideSimklValue = hideWatchedSimkl === 'on' ? true : hideWatchedSimkl === 'off' ? false : undefined;
+    const hideUnreleasedDigitalValue = hideUnreleasedDigital === 'on' ? true : hideUnreleasedDigital === 'off' ? false : undefined;
     setConfig(prev => ({
       ...prev,
       catalogs: prev.catalogs.map(c =>
         c.id === catalog.id && c.type === catalog.type
-          ? { ...c, cacheTTL: Math.max(cacheTTL, minCacheTTL), metadata: { ...c.metadata, hideWatchedTrakt: hideTraktValue, hideWatchedAnilist: hideAnilistValue, hideWatchedMdblist: hideMdblistValue } }
+          ? { ...c, cacheTTL: Math.max(cacheTTL, minCacheTTL), metadata: { ...c.metadata, hideWatchedTrakt: hideTraktValue, hideWatchedAnilist: hideAnilistValue, hideWatchedMdblist: hideMdblistValue, hideWatchedSimkl: hideSimklValue, hideUnreleasedDigital: hideUnreleasedDigitalValue } }
           : c
       )
     }));
@@ -1687,6 +2181,34 @@ const PMDBSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: CatalogConf
               </Select>
             </div>
           )}
+          {config.apiKeys?.simklTokenId && (
+            <div className="space-y-2">
+              <Label>Hide Simkl Watched</Label>
+              <Select value={hideWatchedSimkl} onValueChange={setHideWatchedSimkl}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="global">Use Global Setting</SelectItem>
+                  <SelectItem value="on">Always On</SelectItem>
+                  <SelectItem value="off">Always Off</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+          <div className="space-y-2">
+            <Label>Hide Unreleased Movies</Label>
+            <Select value={hideUnreleasedDigital} onValueChange={setHideUnreleasedDigital}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="global">Use Global Setting</SelectItem>
+                <SelectItem value="on">Always On</SelectItem>
+                <SelectItem value="off">Always Off</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
         <div className="flex justify-end space-x-2">
           <Button variant="outline" onClick={onClose}>Cancel</Button>
@@ -1702,17 +2224,21 @@ const GenericSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: CatalogC
   const [hideWatchedTrakt, setHideWatchedTrakt] = useState<string>(catalog.metadata?.hideWatchedTrakt === true ? 'on' : catalog.metadata?.hideWatchedTrakt === false ? 'off' : 'global');
   const [hideWatchedAnilist, setHideWatchedAnilist] = useState<string>(catalog.metadata?.hideWatchedAnilist === true ? 'on' : catalog.metadata?.hideWatchedAnilist === false ? 'off' : 'global');
   const [hideWatchedMdblist, setHideWatchedMdblist] = useState<string>(catalog.metadata?.hideWatchedMdblist === true ? 'on' : catalog.metadata?.hideWatchedMdblist === false ? 'off' : 'global');
+  const [hideWatchedSimkl, setHideWatchedSimkl] = useState<string>(catalog.metadata?.hideWatchedSimkl === true ? 'on' : catalog.metadata?.hideWatchedSimkl === false ? 'off' : 'global');
+  const [hideUnreleasedDigital, setHideUnreleasedDigital] = useState<string>(catalog.metadata?.hideUnreleasedDigital === true ? 'on' : catalog.metadata?.hideUnreleasedDigital === false ? 'off' : 'global');
 
   const handleSave = () => {
     const hideTraktValue = hideWatchedTrakt === 'on' ? true : hideWatchedTrakt === 'off' ? false : undefined;
     const hideAnilistValue = hideWatchedAnilist === 'on' ? true : hideWatchedAnilist === 'off' ? false : undefined;
     const hideMdblistValue = hideWatchedMdblist === 'on' ? true : hideWatchedMdblist === 'off' ? false : undefined;
+    const hideSimklValue = hideWatchedSimkl === 'on' ? true : hideWatchedSimkl === 'off' ? false : undefined;
+    const hideUnreleasedDigitalValue = hideUnreleasedDigital === 'on' ? true : hideUnreleasedDigital === 'off' ? false : undefined;
     
     setConfig(prev => ({
       ...prev,
       catalogs: prev.catalogs.map(c =>
         c.id === catalog.id && c.type === catalog.type
-          ? { ...c, metadata: { ...c.metadata, hideWatchedTrakt: hideTraktValue, hideWatchedAnilist: hideAnilistValue, hideWatchedMdblist: hideMdblistValue } }
+          ? { ...c, metadata: { ...c.metadata, hideWatchedTrakt: hideTraktValue, hideWatchedAnilist: hideAnilistValue, hideWatchedMdblist: hideMdblistValue, hideWatchedSimkl: hideSimklValue, hideUnreleasedDigital: hideUnreleasedDigitalValue } }
           : c
       )
     }));
@@ -1771,6 +2297,34 @@ const GenericSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: CatalogC
               </Select>
             </div>
           )}
+          {config.apiKeys?.simklTokenId && (
+            <div className="space-y-2">
+              <Label>Hide Simkl Watched</Label>
+              <Select value={hideWatchedSimkl} onValueChange={setHideWatchedSimkl}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="global">Use Global Setting</SelectItem>
+                  <SelectItem value="on">Always On</SelectItem>
+                  <SelectItem value="off">Always Off</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+          <div className="space-y-2">
+            <Label>Hide Unreleased Movies</Label>
+            <Select value={hideUnreleasedDigital} onValueChange={setHideUnreleasedDigital}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="global">Use Global Setting</SelectItem>
+                <SelectItem value="on">Always On</SelectItem>
+                <SelectItem value="off">Always Off</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
         <div className="flex justify-end space-x-2">
           <Button variant="outline" onClick={onClose}>Cancel</Button>
@@ -1781,22 +2335,436 @@ const GenericSettingsDialog = ({ catalog, isOpen, onClose }: { catalog: CatalogC
   );
 };
 
-import { Layers } from 'lucide-react';
-const SortableCatalogItem = ({ catalog, onEditDiscover, onCustomize, onDuplicateDiscover }: {
+import { Layers, GitMerge, Unlink } from 'lucide-react';
+
+const MergedCatalogCard = ({
+  catalog,
+  allCatalogs,
+  onDisband,
+}: {
+  catalog: CatalogConfig;
+  allCatalogs: CatalogConfig[];
+  onDisband: () => void;
+}) => {
+  const { setConfig, config } = useConfig();
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: `${catalog.id}-${catalog.type}`,
+  });
+  const { toggleSelection, isSelected, selectionCount } = useSelection();
+  const catalogKey = `${catalog.id}-${catalog.type}`;
+  const selected = isSelected(catalogKey);
+
+  const sources = catalog.metadata?.mergedSources || [];
+  const sourceCatalogs = sources
+    .map(s => allCatalogs.find(c => c.id === s.catalogId && c.type === s.catalogType))
+    .filter(Boolean) as CatalogConfig[];
+
+  const [expanded, setExpanded] = useState(false);
+  const [showEditDialog, setShowEditDialog] = useState(false);
+  const [newName, setNewName] = useState(catalog.name);
+  const [newType, setNewType] = useState(catalog.displayType || catalog.type);
+  const [showSettings, setShowSettings] = useState(false);
+  const [settingsMergeMode, setSettingsMergeMode] = useState<'interleaved' | 'sequential' | 'alternating'>(catalog.metadata?.mergeMode || 'interleaved');
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    zIndex: isDragging ? 50 : 'auto',
+  };
+
+  const updateCatalog = (updater: (c: CatalogConfig) => CatalogConfig) => {
+    setConfig(prev => ({
+      ...prev,
+      catalogs: prev.catalogs.map(c =>
+        (c.id === catalog.id && c.type === catalog.type) ? updater(c) : c
+      ),
+    }));
+  };
+
+  const handleToggleEnabled = () => {
+    updateCatalog(c => {
+      const isNowEnabled = !c.enabled;
+      return { ...c, enabled: isNowEnabled, showInHome: isNowEnabled ? c.showInHome : false };
+    });
+  };
+
+  const handleToggleShowInHome = () => {
+    if (!catalog.enabled) return;
+    updateCatalog(c => ({ ...c, showInHome: !c.showInHome }));
+  };
+
+  const handleToggleRatingPosters = () => {
+    updateCatalog(c => ({ ...c, enableRatingPosters: c.enableRatingPosters === false ? true : false }));
+  };
+
+  const handleToggleRandomize = () => {
+    updateCatalog(c => ({ ...c, randomizePerPage: !c.randomizePerPage }));
+  };
+
+  const handleEditSave = () => {
+    const trimmedName = newName.trim();
+    const trimmedType = newType.trim();
+    if (!trimmedName || !trimmedType) {
+      setNewName(catalog.name);
+      setNewType(catalog.displayType || catalog.type);
+      setShowEditDialog(false);
+      return;
+    }
+    updateCatalog(c => ({ ...c, name: trimmedName, displayType: trimmedType }));
+    setShowEditDialog(false);
+  };
+
+  const handleEditCancel = () => {
+    setNewName(catalog.name);
+    setNewType(catalog.displayType || catalog.type);
+    setShowEditDialog(false);
+  };
+
+  const handleMoveToTop = () => {
+    setConfig(prev => {
+      const idx = prev.catalogs.findIndex(c => c.id === catalog.id && c.type === catalog.type);
+      if (idx <= 0) return prev;
+      const next = [...prev.catalogs];
+      const [moved] = next.splice(idx, 1);
+      next.unshift(moved);
+      return { ...prev, catalogs: next };
+    });
+  };
+
+  const handleMoveToBottom = () => {
+    setConfig(prev => {
+      const idx = prev.catalogs.findIndex(c => c.id === catalog.id && c.type === catalog.type);
+      if (idx === -1 || idx === prev.catalogs.length - 1) return prev;
+      const next = [...prev.catalogs];
+      const [moved] = next.splice(idx, 1);
+      next.push(moved);
+      return { ...prev, catalogs: next };
+    });
+  };
+
+  const hasRatingPosters = config.posterRatingProvider !== 'none' && !!(config.apiKeys?.rpdb || config.apiKeys?.topPoster || config.customPosterUrlPattern);
+
+  return (
+    <Card
+      ref={setNodeRef}
+      style={style}
+      className={cn(
+        "relative flex flex-col p-4",
+        "border-violet-600/40 bg-violet-950/10 dark:bg-violet-950/20",
+        "transition-all duration-200 ease-out",
+        isDragging && "opacity-80 scale-[1.02] shadow-2xl ring-2 ring-violet-500/50",
+        !isDragging && "hover:-translate-y-[1px] hover:shadow-md",
+        !catalog.enabled && "opacity-60",
+        selected && "ring-2 ring-blue-500"
+      )}
+    >
+      {isDragging && selected && selectionCount > 1 && (
+        <div className="absolute -top-3 -right-3 z-[60] animate-in zoom-in duration-200">
+          <Badge className="bg-blue-600 text-white shadow-xl px-3 py-1 flex items-center gap-1.5 border-2 border-background">
+            <Layers className="h-3.5 w-3.5" />
+            <span className="font-bold">Moving {selectionCount} items</span>
+          </Badge>
+        </div>
+      )}
+
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 md:gap-2">
+        {/* Row 1: Catalog info (checkbox, drag, name) */}
+        <div className="flex items-start md:items-center space-x-2 sm:space-x-4 w-full md:w-auto">
+        <div
+          onClick={(e) => { e.stopPropagation(); toggleSelection(catalogKey); }}
+          className="cursor-pointer p-2 -ml-2 min-w-[36px] min-h-[36px] md:min-w-0 md:min-h-0 flex items-center pt-1 md:pt-0"
+          role="checkbox"
+          aria-checked={selected}
+          aria-label="Select merged catalog"
+        >
+          <div className={cn(
+            "w-5 h-5 border-2 rounded flex items-center justify-center transition-all duration-200 ease-out",
+            selected
+              ? "bg-blue-600 border-blue-600 dark:bg-blue-500 dark:border-blue-500"
+              : "border-gray-400 dark:border-gray-600 hover:border-blue-500 dark:hover:border-blue-400"
+          )}>
+            {selected && (
+              <svg
+                className="w-3.5 h-3.5 text-white"
+                fill="none"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="2.5"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <path d="M5 13l4 4L19 7" />
+              </svg>
+            )}
+          </div>
+        </div>
+
+        <button
+          {...attributes}
+          {...listeners}
+          className="cursor-grab text-muted-foreground p-2 -ml-2 touch-none pt-1 md:pt-0"
+          aria-label="Drag to reorder"
+        >
+          <GripVertical />
+        </button>
+
+        <div className="flex-1 min-w-0">
+          <div className="flex items-start gap-2 min-w-0">
+            <GitMerge className="h-4 w-4 text-violet-400 shrink-0 mt-1" />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1 min-w-0">
+                <p className={`font-medium line-clamp-2 min-w-0 flex-1 md:flex-none transition-colors ${catalog.enabled ? 'text-foreground' : 'text-muted-foreground'}`}>{catalog.name}</p>
+                <button
+                  onClick={() => setShowEditDialog(true)}
+                  className="text-muted-foreground hover:text-foreground shrink-0"
+                >
+                  <Pencil size={14} />
+                </button>
+                <div className="flex md:hidden items-center shrink-0 -mr-1">
+                  <Button variant="ghost" size="icon" onClick={handleToggleEnabled} className="h-9 w-9 active:scale-90 transition-transform">
+                    {catalog.enabled ? (
+                      <Eye className="h-5 w-5 text-green-500 dark:text-green-400" />
+                    ) : (
+                      <EyeOff className="h-5 w-5 text-muted-foreground" />
+                    )}
+                  </Button>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="ghost" size="icon" className="h-9 w-9">
+                        <MoreHorizontal className="h-5 w-5 text-muted-foreground" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="w-52">
+                      <DropdownMenuItem onClick={handleToggleShowInHome} disabled={!catalog.enabled}>
+                        <Home className={`h-4 w-4 mr-2 ${catalog.showInHome && catalog.enabled ? 'text-blue-400' : 'text-muted-foreground'}`} />
+                        {catalog.showInHome && catalog.enabled ? 'Remove from Home' : 'Show on Home'}
+                      </DropdownMenuItem>
+                      {hasRatingPosters && (
+                        <DropdownMenuItem onClick={handleToggleRatingPosters} disabled={!catalog.enabled}>
+                          <Star className={`h-4 w-4 mr-2 ${catalog.enableRatingPosters !== false && catalog.enabled ? 'text-yellow-400' : 'text-muted-foreground'}`} />
+                          {catalog.enableRatingPosters !== false ? 'Disable Rating Posters' : 'Enable Rating Posters'}
+                        </DropdownMenuItem>
+                      )}
+                      <DropdownMenuItem onClick={handleToggleRandomize} disabled={!catalog.enabled}>
+                        <Shuffle className={`h-4 w-4 mr-2 ${catalog.randomizePerPage && catalog.enabled ? 'text-purple-400' : 'text-muted-foreground'}`} />
+                        {catalog.randomizePerPage ? 'Original Order' : 'Randomize Order'}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => { setSettingsMergeMode(catalog.metadata?.mergeMode || 'interleaved'); setShowSettings(true); }}>
+                        <Settings className="h-4 w-4 mr-2 text-muted-foreground" />
+                        Merge Settings
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem onClick={handleMoveToTop}>Move to Top</DropdownMenuItem>
+                      <DropdownMenuItem onClick={handleMoveToBottom}>Move to Bottom</DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem onClick={onDisband} className="text-red-500">
+                        <Trash2 className="h-4 w-4 mr-2" />Disband
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              </div>
+              <div className="mt-1.5 flex items-center gap-2 flex-wrap">
+                <Badge variant="outline" className="text-xs capitalize shrink-0">
+                  {catalog.displayType || catalog.type}
+                </Badge>
+                <CatalogTagRow catalog={catalog} mode="button" />
+              </div>
+              <CatalogTagRow catalog={catalog} mode="chips" className="mt-1.5" />
+              <p className="mt-1.5 text-xs text-muted-foreground">
+                {sources.length} sources · {catalog.metadata?.mergeMode || 'interleaved'}
+                {' · '}
+                <button
+                  type="button"
+                  onClick={() => setExpanded(v => !v)}
+                  className="hover:text-foreground underline-offset-2 hover:underline"
+                >
+                  {expanded ? 'Hide sources' : 'Show sources'}
+                </button>
+              </p>
+            </div>
+          </div>
+        </div>
+        </div>
+
+        {/* Row 2 (Desktop): Full action buttons */}
+        <div className="hidden md:flex items-center flex-wrap gap-1 md:ml-auto justify-end">
+          <TooltipProvider delayDuration={300}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon" onClick={handleToggleEnabled} className="h-8 w-8 active:scale-90 transition-transform">
+                  {catalog.enabled ? (
+                    <Eye className="h-5 w-5 text-green-500 dark:text-green-400" />
+                  ) : (
+                    <EyeOff className="h-5 w-5 text-muted-foreground" />
+                  )}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{catalog.enabled ? 'Disable' : 'Enable'}</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon" onClick={handleToggleShowInHome} disabled={!catalog.enabled} className="h-8 w-8 active:scale-90 transition-transform">
+                  <Home className={`h-5 w-5 ${catalog.showInHome && catalog.enabled ? 'text-blue-400' : 'text-muted-foreground'}`} />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{catalog.showInHome ? 'Remove from Home' : 'Show on Home'}</TooltipContent>
+            </Tooltip>
+            {hasRatingPosters && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button variant="ghost" size="icon" onClick={handleToggleRatingPosters} disabled={!catalog.enabled} className="h-8 w-8 active:scale-90 transition-transform">
+                    <Star className={`h-5 w-5 ${catalog.enableRatingPosters !== false && catalog.enabled ? 'text-yellow-400' : 'text-muted-foreground'}`} />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{catalog.enableRatingPosters !== false ? 'Disable Rating Posters' : 'Enable Rating Posters'}</TooltipContent>
+              </Tooltip>
+            )}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon" onClick={handleToggleRandomize} disabled={!catalog.enabled} className="h-8 w-8 active:scale-90 transition-transform">
+                  <Shuffle className={`h-5 w-5 ${catalog.randomizePerPage && catalog.enabled ? 'text-purple-400' : 'text-muted-foreground'}`} />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{catalog.randomizePerPage ? 'Original Order' : 'Randomize Order'}</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon" onClick={handleMoveToTop} aria-label="Move to Top" className="h-8 w-8 active:scale-90 transition-transform">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 256 256" className="text-muted-foreground hover:text-foreground" fill="currentColor">
+                    <path d="M213.66,194.34a8,8,0,0,1-11.32,11.32L128,131.31,53.66,205.66a8,8,0,0,1-11.32-11.32l80-80a8,8,0,0,1,11.32,0Zm-160-68.68L128,51.31l74.34,74.35a8,8,0,0,0,11.32-11.32l-80-80a8,8,0,0,0-11.32,0l-80,80a8,8,0,0,0,11.32,11.32Z" />
+                  </svg>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Move to top of list</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon" onClick={handleMoveToBottom} aria-label="Move to Bottom" className="h-8 w-8 active:scale-90 transition-transform">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 256 256" className="text-muted-foreground hover:text-foreground" fill="currentColor">
+                    <path d="M213.66,130.34a8,8,0,0,1,0,11.32l-80,80a8,8,0,0,1-11.32,0l-80-80a8,8,0,0,1,11.32-11.32L128,204.69l74.34-74.35A8,8,0,0,1,213.66,130.34Zm-91.32,11.32a8,8,0,0,0,11.32,0l80-80a8,8,0,0,0-11.32-11.32L128,124.69,53.66,50.34A8,8,0,0,0,42.34,61.66Z" />
+                  </svg>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Move to bottom of list</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon" onClick={() => { setSettingsMergeMode(catalog.metadata?.mergeMode || 'interleaved'); setShowSettings(true); }} className="h-8 w-8 active:scale-90 transition-transform">
+                  <Settings className="h-5 w-5 text-muted-foreground hover:text-foreground" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Merge settings</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon" onClick={onDisband} className="h-8 w-8 active:scale-90 transition-transform">
+                  <Unlink className="h-5 w-5 text-red-400 hover:text-red-500" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Disband merged catalog</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+          <Badge variant="outline" className={`font-semibold shrink-0 ${sourceBadgeStyles.merged}`}>
+            MERGED
+          </Badge>
+        </div>
+      </div>
+
+      {expanded && sourceCatalogs.length > 0 && (
+        <div className="mt-3 pl-12 space-y-1">
+          {sourceCatalogs.map(sc => {
+            const styleClass = sourceBadgeStyles[sc.source as keyof typeof sourceBadgeStyles] || "bg-gray-700";
+            return (
+              <div key={`${sc.id}-${sc.type}`} className="flex items-center gap-2 text-sm flex-wrap">
+                <Badge variant="outline" className={`text-[10px] ${styleClass}`}>
+                  {sourceBadgeLabels[sc.source] || sc.source.toUpperCase()}
+                </Badge>
+                <span className="text-muted-foreground break-words min-w-0">{sc.name}</span>
+                <Badge variant="outline" className="text-[10px] capitalize">
+                  {sc.displayType || sc.type}
+                </Badge>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <Dialog open={showEditDialog} onOpenChange={setShowEditDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit Merged Catalog</DialogTitle>
+            <DialogDescription>Change the name or display type.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 pt-2">
+            <div>
+              <Label>Name</Label>
+              <Input value={newName} onChange={e => setNewName(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleEditSave()} />
+            </div>
+            <div>
+              <Label>Display Type</Label>
+              <Input value={newType} onChange={e => setNewType(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleEditSave()} />
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={handleEditCancel}>Cancel</Button>
+              <Button onClick={handleEditSave}>Save</Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showSettings} onOpenChange={setShowSettings}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Merge Settings</DialogTitle>
+            <DialogDescription>Configure how source catalogs are combined.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 pt-2">
+            <div>
+              <Label>Merge Mode</Label>
+              <Select value={settingsMergeMode} onValueChange={(v: 'interleaved' | 'sequential' | 'alternating') => setSettingsMergeMode(v)}>
+                <SelectTrigger className="mt-1">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="interleaved">Interleaved (A1 B1 A2 B2)</SelectItem>
+                  <SelectItem value="sequential">Sequential (all A, then all B)</SelectItem>
+                  <SelectItem value="alternating">Alternating (page 1 = A, page 2 = B)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setShowSettings(false)}>Cancel</Button>
+              <Button onClick={() => {
+                updateCatalog(c => ({ ...c, metadata: { ...c.metadata, mergeMode: settingsMergeMode } }));
+                setShowSettings(false);
+              }}>Save</Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+    </Card>
+  );
+};
+
+const SortableCatalogItem = React.memo(({ catalog, onEditDiscover, onCustomize, onDuplicateDiscover }: {
   catalog: CatalogConfig & { source?: string };
   onEditDiscover?: (catalog: CatalogConfig) => void;
   onCustomize?: (catalog: CatalogConfig) => void;
   onDuplicateDiscover?: (catalog: CatalogConfig) => void;
 }) => {
   const { setConfig, config } = useConfig();
-  const { toggleSelection, isSelected, selectionCount } = useSelection(); 
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ 
-    id: `${catalog.id}-${catalog.type}` 
+  const { toggleSelection, isSelected, selectionCount } = useSelection();
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: `${catalog.id}-${catalog.type}`
   });
   const [showEditDialog, setShowEditDialog] = useState(false);
   const [newName, setNewName] = useState(catalog.name);
   const [newType, setNewType] = useState(catalog.displayType || catalog.type);
   const [showSettings, setShowSettings] = useState(false);
+  const [showDisbandWarning, setShowDisbandWarning] = useState(false);
+  const [disbandTargetName, setDisbandTargetName] = useState('');
 
   const catalogKey = `${catalog.id}-${catalog.type}`;
   const selected = isSelected(catalogKey);
@@ -1810,15 +2778,9 @@ const SortableCatalogItem = ({ catalog, onEditDiscover, onCustomize, onDuplicate
   const badgeSource = catalog.source || 'custom';
   const badgeStyle = sourceBadgeStyles[badgeSource as keyof typeof sourceBadgeStyles] || "bg-gray-700";
 
-  const [isRippling, setIsRippling] = useState(false);
-
   const handleCheckboxClick = (e: React.MouseEvent) => {
     e.stopPropagation();
     toggleSelection(catalogKey);
-    
-    // Trigger ripple effect
-    setIsRippling(true);
-    setTimeout(() => setIsRippling(false), 600);
   };
 
   const handleToggleEnabled = () => {
@@ -1911,11 +2873,73 @@ const SortableCatalogItem = ({ catalog, onEditDiscover, onCustomize, onDuplicate
     setShowEditDialog(false);
   };
 
+  const wouldDisbandMerge = (): string | null => {
+    const targetKey = `${catalog.id}-${catalog.type}`;
+    for (const c of config.catalogs) {
+      if (c.source !== 'merged') continue;
+      const sources = c.metadata?.mergedSources || [];
+      const remaining = sources.filter(s => `${s.catalogId}-${s.catalogType}` !== targetKey);
+      if (remaining.length < sources.length && remaining.length < 2) return c.name || c.id;
+    }
+    return null;
+  };
+
+  const executeDelete = () => {
+    setConfig(prev => {
+      const targetKey = `${catalog.id}-${catalog.type}`;
+      let next = prev.catalogs;
+
+      next = next.map(c => {
+        if (c.source !== 'merged') return c;
+        const sources = c.metadata?.mergedSources || [];
+        const filtered = sources.filter(s => `${s.catalogId}-${s.catalogType}` !== targetKey);
+        if (filtered.length === sources.length) return c;
+        return { ...c, metadata: { ...c.metadata, mergedSources: filtered } };
+      });
+
+      const orphans = next.filter(c =>
+        c.source === 'merged' && (c.metadata?.mergedSources?.length || 0) < 2
+      );
+      for (const merged of orphans) {
+        const sources = merged.metadata?.mergedSources || [];
+        next = next
+          .filter(c => !(c.id === merged.id && c.type === merged.type))
+          .map(c => {
+            const src = sources.find(s => s.catalogId === c.id && s.catalogType === c.type);
+            if (!src) return c;
+            const { mergedInto, ...rest } = c;
+            return {
+              ...rest,
+              enabled: src.originalEnabled,
+              showInHome: src.originalShowInHome,
+            };
+          });
+      }
+
+      const liveMergedIds = new Set(
+        next.filter(c => c.source === 'merged').map(c => c.id)
+      );
+      next = next.map(c => {
+        if (!c.mergedInto) return c;
+        if (liveMergedIds.has(c.mergedInto)) return c;
+        const { mergedInto, ...rest } = c;
+        return rest;
+      });
+
+      next = next.filter(c => !(c.id === catalog.id && c.type === catalog.type));
+
+      return { ...prev, catalogs: reconcileMergedReferences(next) };
+    });
+  };
+
   const handleDelete = () => {
-    setConfig(prev => ({
-      ...prev,
-      catalogs: prev.catalogs.filter(c => !(c.id === catalog.id && c.type === catalog.type)),
-    }));
+    const mergeName = wouldDisbandMerge();
+    if (mergeName) {
+      setDisbandTargetName(mergeName);
+      setShowDisbandWarning(true);
+    } else {
+      executeDelete();
+    }
   };
 
   const handleMoveToTop = () => {
@@ -1950,11 +2974,13 @@ const SortableCatalogItem = ({ catalog, onEditDiscover, onCustomize, onDuplicate
     });
   };
 
-  const hasRatingPosters = !!(config.apiKeys?.rpdb || config.apiKeys?.topPoster || config.customPosterUrlPattern);
-  const hasSettings = catalog.source === 'mdblist' || catalog.source === 'trakt' || (catalog.source === 'simkl' && !catalog.id.startsWith('simkl.watchlist.')) || catalog.source === 'letterboxd' || catalog.source === 'streaming' ||
+  const hasRatingPosters = config.posterRatingProvider !== 'none' && !!(config.apiKeys?.rpdb || config.apiKeys?.topPoster || config.customPosterUrlPattern);
+  const hasSettings = catalog.source === 'mdblist' || catalog.source === 'trakt' || (catalog.source === 'simkl' && !catalog.id.startsWith('simkl.watchlist.')) || catalog.source === 'movielens' || catalog.source === 'letterboxd' || catalog.source === 'streaming' ||
     (catalog.source === 'tmdb' && (catalog.id === 'tmdb.year' || catalog.id === 'tmdb.language')) ||
     !!(config.apiKeys?.traktTokenId || config.apiKeys?.anilistTokenId || config.apiKeys?.mdblist);
   const isDiscover = catalog.id.includes('.discover.') && !!catalog.metadata?.discover?.formState;
+  const isMovieLensExplore = catalog.source === 'movielens' && catalog.id.startsWith('movielens.explore');
+  const canDuplicate = isDiscover || isMovieLensExplore;
   const canDelete = true;
 
   return (
@@ -1962,7 +2988,7 @@ const SortableCatalogItem = ({ catalog, onEditDiscover, onCustomize, onDuplicate
       ref={setNodeRef}
       style={style}
       className={cn(
-        "relative flex flex-col md:flex-row md:items-center md:justify-between p-4",
+        "relative flex flex-col p-4",
         // Smooth transitions for all properties
         "transition-all duration-200 ease-out",
         // Dragging state
@@ -1989,11 +3015,12 @@ const SortableCatalogItem = ({ catalog, onEditDiscover, onCustomize, onDuplicate
         </div>
       )}
 
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 md:gap-2">
       {/* Row 1: Catalog info (checkbox, drag, name) */}
-      <div className="flex items-center space-x-4 w-full md:w-auto">
+      <div className="flex items-start md:items-center space-x-2 sm:space-x-4 w-full md:w-auto">
         <div
           onClick={handleCheckboxClick}
-          className="flex items-center cursor-pointer p-2 -ml-2 min-w-[40px] min-h-[40px] md:min-w-0 md:min-h-0"
+          className="flex items-center cursor-pointer p-2 -ml-2 min-w-[36px] min-h-[36px] md:min-w-0 md:min-h-0 pt-1 md:pt-0"
           role="checkbox"
           aria-checked={selected}
           aria-label="Select catalog"
@@ -2002,9 +3029,6 @@ const SortableCatalogItem = ({ catalog, onEditDiscover, onCustomize, onDuplicate
             "w-5 h-5 border-2 rounded flex items-center justify-center",
             // Smooth color transitions
             "transition-all duration-200 ease-out",
-            // Ripple effect container
-            "checkbox-ripple",
-            isRippling && "ripple-active",
             // Selected state
             selected && "bg-blue-600 border-blue-600 dark:bg-blue-500 dark:border-blue-500",
             // Unselected state with hover
@@ -2025,142 +3049,165 @@ const SortableCatalogItem = ({ catalog, onEditDiscover, onCustomize, onDuplicate
             )}
           </div>
         </div>
-        <button {...attributes} {...listeners} className="cursor-grab text-muted-foreground p-2 -ml-2 touch-none" aria-label="Drag to reorder">
+        <button {...attributes} {...listeners} className="cursor-grab text-muted-foreground p-2 -ml-2 touch-none pt-1 md:pt-0" aria-label="Drag to reorder">
           <GripVertical />
         </button>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <p className={`font-medium transition-colors break-words min-w-0 ${catalog.enabled ? 'text-foreground' : 'text-muted-foreground'}`}>{catalog.name}</p>
+          <div className="flex items-center gap-1 min-w-0">
+            {catalog.mergedInto && (() => {
+              const parent = config.catalogs.find(c => c.id === catalog.mergedInto);
+              return (
+                <TooltipProvider delayDuration={300}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <GitMerge className="h-4 w-4 text-purple-400 shrink-0 mt-0.5 cursor-help" />
+                    </TooltipTrigger>
+                    <TooltipContent side="top">
+                      <p className="text-xs">Part of <span className="font-medium">{parent?.name || 'a merged catalog'}</span></p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              );
+            })()}
+            <p className={`font-medium line-clamp-2 min-w-0 flex-1 md:flex-none transition-colors ${catalog.enabled ? 'text-foreground' : 'text-muted-foreground'}`}>{catalog.name}</p>
             <button
               onClick={() => setShowEditDialog(true)}
               className="text-muted-foreground hover:text-foreground shrink-0"
             >
               <Pencil size={14} />
             </button>
-          </div>
-          <div className="flex flex-wrap items-center gap-2 mt-1">
-            {/* Show itemCount and author only on screens >= sm for trakt and mdblist */}
-            <div className="hidden sm:inline-flex gap-2 flex-wrap">
-              {(catalog.source === 'trakt' || catalog.source === 'mdblist') && (catalog as any).metadata?.itemCount !== undefined && (
-                <Badge variant="outline" className="text-xs">
-                  {(catalog as any).metadata.itemCount} items
-                </Badge>
-              )}
-              {(catalog.source === 'trakt' || catalog.source === 'mdblist') && (catalog as any).metadata?.author && (
-                <Badge variant="outline" className="text-xs">
-                  @{(catalog as any).metadata.author}
-                </Badge>
-              )}
+            <div className="flex md:hidden items-center shrink-0 -mr-1">
+              <Button variant="ghost" size="icon" onClick={handleToggleEnabled} className="h-9 w-9 active:scale-90 transition-transform">
+                {catalog.enabled ? (
+                  <Eye className="h-5 w-5 text-green-500 dark:text-green-400" />
+                ) : (
+                  <EyeOff className="h-5 w-5 text-muted-foreground" />
+                )}
+              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" size="icon" className="h-9 w-9">
+                    <MoreHorizontal className="h-5 w-5 text-muted-foreground" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-52">
+                  <DropdownMenuItem onClick={handleToggleShowInHome} disabled={!catalog.enabled}>
+                    <Home className={`h-4 w-4 mr-2 ${catalog.showInHome && catalog.enabled ? 'text-blue-400' : 'text-muted-foreground'}`} />
+                    {catalog.showInHome && catalog.enabled ? 'Remove from Home' : 'Show on Home'}
+                  </DropdownMenuItem>
+                  {hasRatingPosters && (
+                    <DropdownMenuItem onClick={handleToggleRatingPosters} disabled={!catalog.enabled}>
+                      <Star className={`h-4 w-4 mr-2 ${catalog.enableRatingPosters !== false && catalog.enabled ? 'text-yellow-400' : 'text-muted-foreground'}`} />
+                      {catalog.enableRatingPosters !== false ? 'Disable Rating Posters' : 'Enable Rating Posters'}
+                    </DropdownMenuItem>
+                  )}
+                  <DropdownMenuItem onClick={handleToggleRandomize} disabled={!catalog.enabled}>
+                    <Shuffle className={`h-4 w-4 mr-2 ${catalog.randomizePerPage && catalog.enabled ? 'text-purple-400' : 'text-muted-foreground'}`} />
+                    {catalog.randomizePerPage ? 'Original Order' : 'Randomize Order'}
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={handleMoveToTop}>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 256 256" className="h-4 w-4 mr-2 text-muted-foreground" fill="currentColor">
+                      <path d="M213.66,194.34a8,8,0,0,1-11.32,11.32L128,131.31,53.66,205.66a8,8,0,0,1-11.32-11.32l80-80a8,8,0,0,1,11.32,0Zm-160-68.68L128,51.31l74.34,74.35a8,8,0,0,0,11.32-11.32l-80-80a8,8,0,0,0-11.32,0l-80,80a8,8,0,0,0,11.32,11.32Z" />
+                    </svg>
+                    Move to Top
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={handleMoveToBottom}>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 256 256" className="h-4 w-4 mr-2 text-muted-foreground" fill="currentColor">
+                      <path d="M213.66,130.34a8,8,0,0,1,0,11.32l-80,80a8,8,0,0,1-11.32,0l-80-80a8,8,0,0,1,11.32-11.32L128,204.69l74.34-74.35A8,8,0,0,1,213.66,130.34Zm-91.32,11.32a8,8,0,0,0,11.32,0l80-80a8,8,0,0,0-11.32-11.32L128,124.69,53.66,50.34A8,8,0,0,0,42.34,61.66Z" />
+                    </svg>
+                    Move to Bottom
+                  </DropdownMenuItem>
+                  {hasSettings && (
+                    <>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem onClick={() => setShowSettings(true)}>
+                        <Settings className="h-4 w-4 mr-2 text-muted-foreground" />
+                        Settings
+                      </DropdownMenuItem>
+                    </>
+                  )}
+                  <DropdownMenuItem onClick={() => setShowEditDialog(true)}>
+                    <Pencil className="h-4 w-4 mr-2 text-muted-foreground" />
+                    Rename
+                  </DropdownMenuItem>
+                  {canDuplicate && (
+                    <>
+                      <DropdownMenuSeparator />
+                      {isDiscover && (
+                        <DropdownMenuItem onClick={() => onEditDiscover?.(catalog)}>
+                          <Wand2 className="h-4 w-4 mr-2 text-muted-foreground" />
+                          Edit Filters
+                        </DropdownMenuItem>
+                      )}
+                      <DropdownMenuItem onClick={() => onDuplicateDiscover?.(catalog)}>
+                        <Copy className="h-4 w-4 mr-2 text-muted-foreground" />
+                        Duplicate
+                      </DropdownMenuItem>
+                    </>
+                  )}
+                  {onCustomize && (
+                    <DropdownMenuItem onClick={() => onCustomize(catalog)}>
+                      <Wand2 className="h-4 w-4 mr-2 text-blue-400" />
+                      Clone as Built Catalog
+                    </DropdownMenuItem>
+                  )}
+                  {canDelete && (
+                    <>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem onClick={handleDelete} className="text-red-400 focus:text-red-400">
+                        <Trash2 className="h-4 w-4 mr-2" />
+                        Delete
+                      </DropdownMenuItem>
+                    </>
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
-            {/* Show only type badge on mobile */}
-            <Badge
-              variant="outline"
-              className={`text-xs capitalize ${catalog.enabled ? '' : 'opacity-50'} flex sm:hidden`}
-            >
-              {catalog.displayType || catalog.type}
-            </Badge>
-            {/* Show type badge on desktop as well */}
-            <Badge
-              variant="outline"
-              className={`text-xs capitalize ${catalog.enabled ? '' : 'opacity-50'} hidden sm:flex`}
-            >
-              {catalog.displayType || catalog.type}
-            </Badge>
           </div>
+          <div className="mt-1.5 flex items-center gap-2 flex-wrap">
+            <Badge
+              variant="outline"
+              className={`font-semibold text-xs shrink-0 md:hidden ${badgeStyle} ${catalog.enabled ? '' : 'opacity-50'}`}
+            >
+              {sourceBadgeLabels[badgeSource] || badgeSource.toUpperCase()}
+            </Badge>
+            <Badge
+              variant="outline"
+              className={`text-xs capitalize ${catalog.enabled ? '' : 'opacity-50'} shrink-0`}
+            >
+              {catalog.displayType || catalog.type}
+            </Badge>
+            <CatalogTagRow catalog={catalog} mode="button" />
+          </div>
+          <CatalogTagRow catalog={catalog} mode="chips" className="mt-1.5" />
+          {(catalog.source === 'trakt' || catalog.source === 'mdblist') &&
+            ((catalog as any).metadata?.itemCount !== undefined || (catalog as any).metadata?.author) && (
+            <>
+              <div className="hidden sm:flex flex-wrap items-center gap-2 mt-1.5">
+                {(catalog as any).metadata?.itemCount !== undefined && (
+                  <Badge variant="outline" className="text-xs">
+                    {(catalog as any).metadata.itemCount} items
+                  </Badge>
+                )}
+                {(catalog as any).metadata?.author && (
+                  <Badge variant="outline" className="text-xs">
+                    @{(catalog as any).metadata.author}
+                  </Badge>
+                )}
+              </div>
+              <p className="sm:hidden mt-1.5 text-xs text-muted-foreground">
+                {(catalog as any).metadata?.itemCount !== undefined && (
+                  <span>{(catalog as any).metadata.itemCount} items</span>
+                )}
+                {(catalog as any).metadata?.itemCount !== undefined && (catalog as any).metadata?.author && ' · '}
+                {(catalog as any).metadata?.author && (
+                  <span>@{(catalog as any).metadata.author}</span>
+                )}
+              </p>
+            </>
+          )}
         </div>
-      </div>
-
-      {/* Row 2 (Mobile): Compact actions with overflow menu */}
-      <div className="flex md:hidden items-center gap-2 mt-3 justify-between">
-        <div className="flex items-center gap-1">
-          <Button variant="ghost" size="icon" onClick={handleToggleEnabled} className="h-9 w-9 active:scale-90 transition-transform">
-            {catalog.enabled ? (
-              <Eye className="h-5 w-5 text-green-500 dark:text-green-400" />
-            ) : (
-              <EyeOff className="h-5 w-5 text-muted-foreground" />
-            )}
-          </Button>
-          <Badge variant="outline" className={`font-semibold text-xs ${badgeStyle}`}>
-            {sourceBadgeLabels[badgeSource] || badgeSource.toUpperCase()}
-          </Badge>
-        </div>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon" className="h-9 w-9">
-              <MoreHorizontal className="h-5 w-5 text-muted-foreground" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-52">
-            <DropdownMenuItem onClick={handleToggleShowInHome} disabled={!catalog.enabled}>
-              <Home className={`h-4 w-4 mr-2 ${catalog.showInHome && catalog.enabled ? 'text-blue-400' : 'text-muted-foreground'}`} />
-              {catalog.showInHome && catalog.enabled ? 'Remove from Home' : 'Show on Home'}
-            </DropdownMenuItem>
-            {hasRatingPosters && (
-              <DropdownMenuItem onClick={handleToggleRatingPosters} disabled={!catalog.enabled}>
-                <Star className={`h-4 w-4 mr-2 ${catalog.enableRatingPosters !== false && catalog.enabled ? 'text-yellow-400' : 'text-muted-foreground'}`} />
-                {catalog.enableRatingPosters !== false ? 'Disable Rating Posters' : 'Enable Rating Posters'}
-              </DropdownMenuItem>
-            )}
-            <DropdownMenuItem onClick={handleToggleRandomize} disabled={!catalog.enabled}>
-              <Shuffle className={`h-4 w-4 mr-2 ${catalog.randomizePerPage && catalog.enabled ? 'text-purple-400' : 'text-muted-foreground'}`} />
-              {catalog.randomizePerPage ? 'Original Order' : 'Randomize Order'}
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={handleMoveToTop}>
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 256 256" className="h-4 w-4 mr-2 text-muted-foreground" fill="currentColor">
-                <path d="M213.66,194.34a8,8,0,0,1-11.32,11.32L128,131.31,53.66,205.66a8,8,0,0,1-11.32-11.32l80-80a8,8,0,0,1,11.32,0Zm-160-68.68L128,51.31l74.34,74.35a8,8,0,0,0,11.32-11.32l-80-80a8,8,0,0,0-11.32,0l-80,80a8,8,0,0,0,11.32,11.32Z" />
-              </svg>
-              Move to Top
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={handleMoveToBottom}>
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 256 256" className="h-4 w-4 mr-2 text-muted-foreground" fill="currentColor">
-                <path d="M213.66,130.34a8,8,0,0,1,0,11.32l-80,80a8,8,0,0,1-11.32,0l-80-80a8,8,0,0,1,11.32-11.32L128,204.69l74.34-74.35A8,8,0,0,1,213.66,130.34Zm-91.32,11.32a8,8,0,0,0,11.32,0l80-80a8,8,0,0,0-11.32-11.32L128,124.69,53.66,50.34A8,8,0,0,0,42.34,61.66Z" />
-              </svg>
-              Move to Bottom
-            </DropdownMenuItem>
-            {hasSettings && (
-              <>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => setShowSettings(true)}>
-                  <Settings className="h-4 w-4 mr-2 text-muted-foreground" />
-                  Settings
-                </DropdownMenuItem>
-              </>
-            )}
-            <DropdownMenuItem onClick={() => setShowEditDialog(true)}>
-              <Pencil className="h-4 w-4 mr-2 text-muted-foreground" />
-              Rename
-            </DropdownMenuItem>
-            {isDiscover && (
-              <>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => onEditDiscover?.(catalog)}>
-                  <Wand2 className="h-4 w-4 mr-2 text-muted-foreground" />
-                  Edit Filters
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => onDuplicateDiscover?.(catalog)}>
-                  <Copy className="h-4 w-4 mr-2 text-muted-foreground" />
-                  Duplicate
-                </DropdownMenuItem>
-              </>
-            )}
-            {onCustomize && (
-              <DropdownMenuItem onClick={() => onCustomize(catalog)}>
-                <Wand2 className="h-4 w-4 mr-2 text-blue-400" />
-                Clone as Built Catalog
-              </DropdownMenuItem>
-            )}
-            {canDelete && (
-              <>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={handleDelete} className="text-red-400 focus:text-red-400">
-                  <Trash2 className="h-4 w-4 mr-2" />
-                  Delete
-                </DropdownMenuItem>
-              </>
-            )}
-          </DropdownMenuContent>
-        </DropdownMenu>
       </div>
 
       {/* Row 2 (Desktop): Full action buttons + Source badge */}
@@ -2252,7 +3299,7 @@ const SortableCatalogItem = ({ catalog, onEditDiscover, onCustomize, onDuplicate
 
 
           {/* Settings Gear - Now show for all catalogs if any tracking is connected */}
-          {(catalog.source === 'mdblist' || catalog.source === 'trakt' || (catalog.source === 'simkl' && !catalog.id.startsWith('simkl.watchlist.')) || catalog.source === 'letterboxd' || catalog.source === 'streaming' || catalog.source === 'publicmetadb' ||
+          {(catalog.source === 'mdblist' || catalog.source === 'trakt' || (catalog.source === 'simkl' && !catalog.id.startsWith('simkl.watchlist.')) || catalog.source === 'movielens' || catalog.source === 'letterboxd' || catalog.source === 'streaming' || catalog.source === 'publicmetadb' ||
             (catalog.source === 'tmdb' && (catalog.id === 'tmdb.year' || catalog.id === 'tmdb.language')) ||
             (config.apiKeys?.traktTokenId || config.apiKeys?.anilistTokenId || config.apiKeys?.mdblist)) && (
             <Tooltip>
@@ -2441,9 +3488,9 @@ const SortableCatalogItem = ({ catalog, onEditDiscover, onCustomize, onDuplicate
           )}
 
           {/* Edit button for discover catalogs with formState */}
-          {catalog.id.includes('.discover.') &&
-            catalog.metadata?.discover?.formState && (
+          {canDuplicate && (
             <>
+            {isDiscover && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -2458,6 +3505,7 @@ const SortableCatalogItem = ({ catalog, onEditDiscover, onCustomize, onDuplicate
               </TooltipTrigger>
               <TooltipContent>Edit catalog filters</TooltipContent>
             </Tooltip>
+            )}
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -2501,11 +3549,13 @@ const SortableCatalogItem = ({ catalog, onEditDiscover, onCustomize, onDuplicate
             <TooltipContent>Remove from your catalog list</TooltipContent>
           </Tooltip>
         </TooltipProvider>
-        <div className="shrink-0">
-          <Badge variant="outline" className={`font-semibold ${badgeStyle}`}>
-            {sourceBadgeLabels[badgeSource] || badgeSource.toUpperCase()}
-          </Badge>
-        </div>
+        <Badge
+          variant="outline"
+          className={`font-semibold shrink-0 ${badgeStyle} ${catalog.enabled ? '' : 'opacity-50'}`}
+        >
+          {sourceBadgeLabels[badgeSource] || badgeSource.toUpperCase()}
+        </Badge>
+      </div>
       </div>
 
       <MDBListSettingsDialog
@@ -2523,6 +3573,12 @@ const SortableCatalogItem = ({ catalog, onEditDiscover, onCustomize, onDuplicate
       <SimklSettingsDialog
         catalog={catalog}
         isOpen={showSettings && catalog.source === 'simkl'}
+        onClose={() => setShowSettings(false)}
+      />
+
+      <MovieLensSettingsDialog
+        catalog={catalog}
+        isOpen={showSettings && catalog.source === 'movielens'}
         onClose={() => setShowSettings(false)}
       />
 
@@ -2569,6 +3625,7 @@ const SortableCatalogItem = ({ catalog, onEditDiscover, onCustomize, onDuplicate
           catalog.source !== 'mdblist' &&
           catalog.source !== 'trakt' &&
           catalog.source !== 'simkl' &&
+          catalog.source !== 'movielens' &&
           catalog.source !== 'letterboxd' &&
           catalog.source !== 'streaming' &&
           catalog.source !== 'custom' &&
@@ -2629,9 +3686,19 @@ const SortableCatalogItem = ({ catalog, onEditDiscover, onCustomize, onDuplicate
           </div>
         </DialogContent>
       </Dialog>
+      <ConfirmDialog
+        isOpen={showDisbandWarning}
+        onClose={() => setShowDisbandWarning(false)}
+        onConfirm={() => { setShowDisbandWarning(false); executeDelete(); }}
+        title="This will disband a merged catalog"
+        description={`Deleting "${catalog.name}" will leave "${disbandTargetName}" with fewer than 2 sources, so it will be automatically disbanded.`}
+        confirmText="Delete anyway"
+        variant="destructive"
+      />
     </Card>
   );
-};
+});
+SortableCatalogItem.displayName = 'SortableCatalogItem';
 
 const StreamingProvidersSettings = ({ open, onClose, selectedProviders, setSelectedProviders, onSave }) => {
   const [selectedCountry, setSelectedCountry] = useState('Any');
@@ -2711,10 +3778,14 @@ const StreamingProvidersSettings = ({ open, onClose, selectedProviders, setSelec
 // Inner component that consumes SelectionContext
 function CatalogsSettingsContent({
   hideDisabledCatalogs,
-  setHideDisabledCatalogs
+  setHideDisabledCatalogs,
+  tagFilters,
+  setTagFilters
 }: {
   hideDisabledCatalogs: boolean;
   setHideDisabledCatalogs: (value: boolean) => void;
+  tagFilters: string[];
+  setTagFilters: React.Dispatch<React.SetStateAction<string[]>>;
 }) {
   const { config, setConfig, hasBuiltInTvdb } = useConfig();
   const {
@@ -2722,6 +3793,10 @@ function CatalogsSettingsContent({
     deselectAll,
     selectBySource,
     deselectBySource,
+    selectByType,
+    deselectByType,
+    selectByTag,
+    deselectByTag,
     invertSelection,
     selectionCount,
     selectedIds
@@ -2729,13 +3804,20 @@ function CatalogsSettingsContent({
   const [isMdbListOpen, setIsMdbListOpen] = useState(false);
   const [isTraktOpen, setIsTraktOpen] = useState(false);
   const [isSimklOpen, setIsSimklOpen] = useState(false);
+  const [isMovieLensOpen, setIsMovieLensOpen] = useState(false);
   const [isPublicMetaDBOpen, setIsPublicMetaDBOpen] = useState(false);
   const [isTmdbListOpen, setIsTmdbListOpen] = useState(false);
   const [isTmdbDiscoverBuilderOpen, setIsTmdbDiscoverBuilderOpen] = useState(false);
+  const [isCollectionBuilderOpen, setIsCollectionBuilderOpen] = useState(false);
+
+  useEffect(() => {
+    if (consumeCollectionBuilderRequest()) setIsCollectionBuilderOpen(true);
+  }, []);
   const [editingDiscoverCatalog, setEditingDiscoverCatalog] = useState<CatalogConfig | null>(null);
   const [customizeTemplate, setCustomizeTemplate] = useState<CustomizeTemplate | null>(null);
   const [isLetterboxdOpen, setIsLetterboxdOpen] = useState(false);
   const [isAniListOpen, setIsAniListOpen] = useState(false);
+  const [isMalOpen, setIsMalOpen] = useState(false);
   const [isCustomManifestOpen, setIsCustomManifestOpen] = useState(false);
   const [isStreamingTop10Open, setIsStreamingTop10Open] = useState(false);
   const [isAIOMetadataOpen, setIsAIOMetadataOpen] = useState(false);
@@ -2779,30 +3861,21 @@ function CatalogsSettingsContent({
     useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 5 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
+  // Stable so a memoized row is not re-rendered by a new function identity.
+  const handleEditDiscover = useCallback((catalog: CatalogConfig) => {
+    setEditingDiscoverCatalog(catalog);
+    setIsTmdbDiscoverBuilderOpen(true);
+  }, []);
 
-
-  const isInitialMount = useRef(true);
-  useEffect(() => { isInitialMount.current = false; }, []);
-
-  const [hasChosenCatalogSetup, setHasChosenCatalogSetup] = useState(
-    () => config.catalogSetupComplete === true
-  );
-
-  useEffect(() => {
-    if (config.catalogSetupComplete) {
-      setHasChosenCatalogSetup(true);
-    }
-  }, [config.catalogSetupComplete]);
-
-  const handleCustomize = (catalog: CatalogConfig) => {
+  const handleCustomize = useCallback((catalog: CatalogConfig) => {
     const getTemplate = DEFAULT_CATALOG_TEMPLATES[catalog.id];
     if (getTemplate) {
       setCustomizeTemplate(getTemplate(catalog));
       setIsTmdbDiscoverBuilderOpen(true);
     }
-  };
+  }, []);
 
-  const handleDuplicateDiscover = (catalog: CatalogConfig) => {
+  const handleDuplicateDiscover = useCallback((catalog: CatalogConfig) => {
     const sanitizedName = (catalog.name + ' (Copy)')
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '_')
@@ -2816,7 +3889,9 @@ function CatalogsSettingsContent({
     };
     const sourcePrefix = SOURCE_PREFIXES[source] ?? 'tmdb.discover';
     const catalogType = catalog.type || 'movie';
-    const newId = `${sourcePrefix}.${catalogType}.${sanitizedName}.${uniqueSuffix}`;
+    const newId = catalog.source === 'movielens'
+      ? `movielens.explore.${sanitizedName}.${uniqueSuffix}`
+      : `${sourcePrefix}.${catalogType}.${sanitizedName}.${uniqueSuffix}`;
 
     const newCatalog: CatalogConfig = {
       ...catalog,
@@ -2834,42 +3909,17 @@ function CatalogsSettingsContent({
       } : undefined,
     };
 
-    setConfig(prev => ({
-      ...prev,
-      catalogs: [...prev.catalogs, newCatalog],
-    }));
+    setConfig(prev => {
+      const idx = prev.catalogs.findIndex(c => c.id === catalog.id && c.type === catalog.type);
+      const catalogs = [...prev.catalogs];
+      catalogs.splice(idx === -1 ? catalogs.length : idx + 1, 0, newCatalog);
+      return { ...prev, catalogs };
+    });
     toast.success('Catalog duplicated', {
       description: `${newCatalog.name} added to your catalog list`
     });
-  };
-  
-  const handleLoadDefaults = () => {
-    setConfig(prev => ({
-      ...prev,
-      catalogSetupComplete: true,
-      catalogs: allCatalogDefinitions.map(c => ({
-        id: c.id,
-        name: c.name,
-        type: c.type,
-        source: c.source,
-        enabled: c.isEnabledByDefault || false,
-        showInHome: c.showOnHomeByDefault || false,
-        enableRatingPosters: true,
-        randomizePerPage: false,
-      })),
-    }));
-    setHasChosenCatalogSetup(true);
-  };
-  
-  const handleStartBlank = () => {
-    setConfig(prev => ({
-      ...prev,
-      catalogSetupComplete: true,
-      catalogs: [],
-    }));
-    setHasChosenCatalogSetup(true);
-    setIsTmdbDiscoverBuilderOpen(true);
-  };
+  }, [setConfig]);
+
 
 
   // Check if TVDB key is available
@@ -2924,17 +3974,22 @@ function CatalogsSettingsContent({
 
   const filteredCatalogs = useMemo(() =>
     config.catalogs.filter(cat => {
+      // Absorbed catalogs remain visible (with a badge) so they can be merged elsewhere
+
       // Filter out disabled catalogs if hideDisabledCatalogs is true
       if (hideDisabledCatalogs && !cat.enabled) return false;
 
       // Filter out TVDB catalogs if no TVDB key is available
       if (cat.source === 'tvdb' && !hasTvdbKey) return false;
 
+      // Filter by selected tags (match any)
+      if (tagFilters.length > 0 && !tagFilters.some(t => cat.tags?.includes(t))) return false;
+
       if (cat.source !== "streaming") return true;
       const serviceId = cat.id.replace("streaming.", "").replace(/ .*/, "");
       return Array.isArray(config.streaming) && config.streaming.includes(serviceId);
     }),
-    [config.catalogs, config.streaming, hideDisabledCatalogs, hasTvdbKey]
+    [config.catalogs, config.streaming, hideDisabledCatalogs, hasTvdbKey, tagFilters]
   );
 
   const handleDragEnd = (event: DragEndEvent) => {
@@ -2978,7 +4033,16 @@ function CatalogsSettingsContent({
     });
   };
 
-  const catalogItemIds = filteredCatalogs.map(c => `${c.id}-${c.type}`);
+  const catalogItemIds = useMemo(
+    () => filteredCatalogs.map(c => `${c.id}-${c.type}`),
+    [filteredCatalogs]
+  );
+
+  /**
+   * Past this many rows the per-row work the list does on every change costs
+   * more than the polish it buys. An import can bring in thousands at once.
+   */
+  const isLargeList = filteredCatalogs.length > LARGE_LIST_THRESHOLD;
 
   // Helper function to get actual selected streaming services from catalogs
   const getActualSelectedStreamingServices = (): string[] => {
@@ -3526,7 +4590,7 @@ function CatalogsSettingsContent({
     if (!importPreview) return;
     try {
       const newCatalogs = mergeCatalogs(config.catalogs, importPreview.payload.catalogs, importMode);
-      setConfig(prev => ({ ...prev, catalogs: newCatalogs }));
+      setConfig(prev => ({ ...prev, catalogs: reconcileMergedReferences(newCatalogs) }));
       toast.success(`Imported ${importPreview.catalogCount} catalogs`, {
         description: importMode === 'replace'
           ? 'Matching catalogs replaced, new catalogs added'
@@ -3548,6 +4612,102 @@ function CatalogsSettingsContent({
     setIsImportLoading(false);
   };
 
+  // Merge dialog state
+  const [showMergeDialog, setShowMergeDialog] = useState(false);
+  const [mergeName, setMergeName] = useState('');
+  const [mergeShowInHome, setMergeShowInHome] = useState(true);
+  const [mergeDisplayType, setMergeDisplayType] = useState('');
+  const [mergeMode, setMergeMode] = useState<'interleaved' | 'sequential' | 'alternating'>('interleaved');
+
+  const openMergeDialog = () => {
+    if (selectedCatalogs.some(c => c.source === 'merged')) {
+      toast.error('Cannot include an existing merged catalog in a new merge.');
+      return;
+    }
+    if (selectedCatalogs.length < 2) {
+      toast.error('Select at least 2 catalogs to merge.');
+      return;
+    }
+    const baseName = selectedCatalogs.slice(0, 3).map(c => c.name).join(' + ')
+      + (selectedCatalogs.length > 3 ? ` +${selectedCatalogs.length - 3}` : '');
+    setMergeName(baseName);
+    setMergeShowInHome(true);
+    setMergeDisplayType('');
+    setMergeMode('interleaved');
+    setShowMergeDialog(true);
+  };
+
+  const handleConfirmMerge = () => {
+    const types = new Set(selectedCatalogs.map(c => c.type));
+    const mergedType: CatalogConfig['type'] = types.size === 1
+      ? ([...types][0] as CatalogConfig['type'])
+      : 'all';
+
+    const uuid = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    const mergeId = `merged.${uuid.replace(/-/g, '').slice(0, 12)}`;
+
+    const mergedSources = selectedCatalogs.map(c => ({
+      catalogId: c.id,
+      catalogType: c.type,
+      originalEnabled: !!c.enabled,
+      originalShowInHome: !!c.showInHome,
+    }));
+
+    const newCatalog: CatalogConfig = {
+      id: mergeId,
+      name: mergeName.trim() || 'Merged Catalog',
+      type: mergedType,
+      enabled: true,
+      source: 'merged',
+      showInHome: mergeShowInHome,
+      displayType: mergeDisplayType.trim() || undefined,
+      metadata: { mergedSources, mergeMode },
+    };
+
+    setConfig(prev => {
+      const selectedKeys = new Set(selectedCatalogs.map(s => `${s.id}-${s.type}`));
+      const updated = prev.catalogs.map(c =>
+        selectedKeys.has(`${c.id}-${c.type}`) ? { ...c, mergedInto: mergeId } : c
+      );
+      const firstAbsorbedIdx = updated.findIndex(c => selectedKeys.has(`${c.id}-${c.type}`));
+      const insertAt = firstAbsorbedIdx >= 0 ? firstAbsorbedIdx : updated.length;
+      const withMerged = [...updated.slice(0, insertAt), newCatalog, ...updated.slice(insertAt)];
+      return { ...prev, catalogs: reconcileMergedReferences(withMerged) };
+    });
+    deselectAll();
+    setShowMergeDialog(false);
+    toast.success(`Merged ${mergedSources.length} catalogs into "${newCatalog.name}"`);
+  };
+
+  const handleDisbandMerge = (mergedCatalog: CatalogConfig) => {
+    const sources = mergedCatalog.metadata?.mergedSources || [];
+
+    setConfig(prev => {
+      const idx = prev.catalogs.findIndex(c =>
+        c.id === mergedCatalog.id && c.type === mergedCatalog.type
+      );
+      if (idx === -1) return prev;
+
+      const restored = prev.catalogs
+        .filter((_, i) => i !== idx)
+        .map(c => {
+          const src = sources.find(s => s.catalogId === c.id && s.catalogType === c.type);
+          if (!src) return c;
+          const { mergedInto, ...rest } = c;
+          return {
+            ...rest,
+            enabled: src.originalEnabled,
+            showInHome: src.originalShowInHome,
+          };
+        });
+      return { ...prev, catalogs: reconcileMergedReferences(restored) };
+    });
+
+    toast.success(`Disbanded "${mergedCatalog.name}"`);
+  };
+
   const handleBulkDelete = () => {
     // Show confirmation dialog
     setShowDeleteConfirmDialog(true);
@@ -3561,30 +4721,77 @@ function CatalogsSettingsContent({
     setLoadingAction('delete');
 
     try {
-      // Filter selected catalogs to only removable ones
-      const catalogsToDelete = selectedCatalogs.filter(isRemovableCatalog);
+      // Split selection: merged catalogs get disbanded, non-merged get deleted.
+      const toDisband = selectedCatalogs.filter(c => c.source === 'merged');
+      const toDelete = selectedCatalogs.filter(c => c.source !== 'merged' && isRemovableCatalog(c));
+      const skippedCount = selectedCatalogs.length - toDisband.length - toDelete.length;
 
-      // Count skipped catalogs (non-removable ones)
-      const skippedCount = selectedCatalogs.length - catalogsToDelete.length;
+      if (toDisband.length > 0 || toDelete.length > 0) {
+        setConfig(prev => {
+          let next = prev.catalogs;
 
-      // Remove catalogs from config state
-      if (catalogsToDelete.length > 0) {
-        setConfig(prev => ({
-          ...prev,
-          catalogs: prev.catalogs.filter(c => {
-            const catalogKey = `${c.id}-${c.type}`;
-            const shouldDelete = catalogsToDelete.some(
-              cat => `${cat.id}-${cat.type}` === catalogKey
-            );
-            return !shouldDelete;
-          })
-        }));
+          // 1) Disband each selected merged catalog: restore sources & remove merged entry.
+          for (const merged of toDisband) {
+            const sources = merged.metadata?.mergedSources || [];
+            const idx = next.findIndex(c => c.id === merged.id && c.type === merged.type);
+            if (idx === -1) continue;
+            next = next
+              .filter((_, i) => i !== idx)
+              .map(c => {
+                const src = sources.find(s => s.catalogId === c.id && s.catalogType === c.type);
+                if (!src) return c;
+                const { mergedInto, ...rest } = c;
+                return {
+                  ...rest,
+                  enabled: src.originalEnabled,
+                  showInHome: src.originalShowInHome,
+                };
+              });
+          }
+
+          // 2) Defensive scrub: for every still-living merged catalog, drop any
+          //    mergedSources that point at catalogs we're about to delete.
+          const toDeleteKeys = new Set(toDelete.map(c => `${c.id}-${c.type}`));
+          next = next.map(c => {
+            if (c.source !== 'merged') return c;
+            const sources = c.metadata?.mergedSources || [];
+            const filtered = sources.filter(s => !toDeleteKeys.has(`${s.catalogId}-${s.catalogType}`));
+            if (filtered.length === sources.length) return c;
+            return { ...c, metadata: { ...c.metadata, mergedSources: filtered } };
+          });
+
+          // 3) Auto-disband merged catalogs that fell below 2 sources after the
+          //    scrub (orphans). Restore any remaining sources first.
+          const orphanMerged: typeof next = next.filter(c =>
+            c.source === 'merged' && (c.metadata?.mergedSources?.length || 0) < 2
+          );
+          for (const merged of orphanMerged) {
+            const sources = merged.metadata?.mergedSources || [];
+            next = next
+              .filter(c => !(c.id === merged.id && c.type === merged.type))
+              .map(c => {
+                const src = sources.find(s => s.catalogId === c.id && s.catalogType === c.type);
+                if (!src) return c;
+                const { mergedInto, ...rest } = c;
+                return {
+                  ...rest,
+                  enabled: src.originalEnabled,
+                  showInHome: src.originalShowInHome,
+                };
+              });
+          }
+
+          // 4) Apply the regular delete now that no merged catalog references them.
+          next = next.filter(c => !toDeleteKeys.has(`${c.id}-${c.type}`));
+
+          return { ...prev, catalogs: reconcileMergedReferences(next) };
+        });
       }
 
       // Show toast notifications using helper
       showBulkDeleteSuccess({
-        affectedCount: catalogsToDelete.length,
-        skippedCount: skippedCount
+        affectedCount: toDelete.length + toDisband.length,
+        skippedCount,
       });
 
       // Clear selection after deletion
@@ -3596,15 +4803,6 @@ function CatalogsSettingsContent({
       setLoadingAction(null);
     }
   };
-
-  if (!hasChosenCatalogSetup) {
-    return (
-      <CatalogStarterChoice
-        onChooseDefaults={handleLoadDefaults}
-        onChooseBlank={handleStartBlank}
-      />
-    );
-  }
 
   return (
     <div className={cn(
@@ -3653,6 +4851,10 @@ function CatalogsSettingsContent({
             <Button onClick={() => setIsTmdbDiscoverBuilderOpen(true)} size="sm" variant="outline">
               <Wand2 className="h-4 w-4 mr-2" />
               Build Your Catalog
+            </Button>
+            <Button onClick={() => setIsCollectionBuilderOpen(true)} size="sm" variant="outline">
+              <Layers className="h-4 w-4 mr-2" />
+              Collections
             </Button>
             {(config.apiKeys?.openrouter || config.apiKeys?.gemini) && (
               <Button onClick={() => setIsAICatalogOpen(true)} size="sm" variant="outline">
@@ -3741,6 +4943,25 @@ function CatalogsSettingsContent({
                     <Button
                       variant="ghost"
                       size="icon"
+                      onClick={() => setIsMovieLensOpen(true)}
+                      aria-label="MovieLens Integration"
+                      className="h-9 w-9"
+                    >
+                      <img
+                        src="https://movielens.org/favicon.ico"
+                        alt="MovieLens"
+                        className="h-5 w-5 rounded object-contain"
+                      />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>MovieLens Integration</TooltipContent>
+                </Tooltip>
+
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
                       onClick={() => setIsPublicMetaDBOpen(true)}
                       aria-label="PublicMetaDB Integration"
                       className="h-9 w-9"
@@ -3798,10 +5019,25 @@ function CatalogsSettingsContent({
 
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button 
-                      variant="ghost" 
-                      size="icon" 
-                      onClick={handleOpenStreamingDialog} 
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => setIsMalOpen(true)}
+                      aria-label="MyAnimeList Integration"
+                      className="h-9 w-9"
+                    >
+                      <img src="/mal_icon.png" alt="MyAnimeList" className="h-5 w-5 object-contain rounded" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>MyAnimeList Integration</TooltipContent>
+                </Tooltip>
+
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={handleOpenStreamingDialog}
                       aria-label="Streaming Providers"
                       className="h-9 w-9"
                     >
@@ -3873,6 +5109,10 @@ function CatalogsSettingsContent({
             isOpen={isSimklOpen}
             onClose={() => setIsSimklOpen(false)}
           />
+          <MovieLensIntegration
+            isOpen={isMovieLensOpen}
+            onClose={() => setIsMovieLensOpen(false)}
+          />
           <PublicMetaDBIntegration
             isOpen={isPublicMetaDBOpen}
             onClose={() => setIsPublicMetaDBOpen(false)}
@@ -3884,6 +5124,10 @@ function CatalogsSettingsContent({
           <AniListIntegration
             isOpen={isAniListOpen}
             onClose={() => setIsAniListOpen(false)}
+          />
+          <MALIntegration
+            isOpen={isMalOpen}
+            onClose={() => setIsMalOpen(false)}
           />
           <StreamingTop10Integration
             isOpen={isStreamingTop10Open}
@@ -3916,7 +5160,8 @@ function CatalogsSettingsContent({
           onSetDisplayType={handleBulkSetDisplayType}
           onResetDisplayType={handleBulkResetDisplayType}
           onFindReplaceType={handleBulkFindReplaceType}
-          hasRatingPostersKey={!!config.apiKeys?.rpdb || !!config.apiKeys?.topPoster || !!config.customPosterUrlPattern}
+          onMergeSelected={openMergeDialog}
+          hasRatingPostersKey={config.posterRatingProvider !== 'none' && (!!config.apiKeys?.rpdb || !!config.apiKeys?.topPoster || !!config.customPosterUrlPattern)}
           isLoading={isLoading}
           loadingAction={loadingAction}
         />
@@ -3930,12 +5175,30 @@ function CatalogsSettingsContent({
           onSelectAll={selectAll}
           onDeselectAll={deselectAll}
         />
-        <SelectBySourceControl
+        <SelectByFieldControl
           catalogs={filteredCatalogs}
-          onSelectBySource={selectBySource}
-          onDeselectBySource={deselectBySource}
+          field="source"
+          label="Select by Source"
+          shortLabel="By Source"
+          onSelect={selectBySource}
+          onDeselect={deselectBySource}
         />
+        <SelectByFieldControl
+          catalogs={filteredCatalogs}
+          field="type"
+          label="Select by Type"
+          shortLabel="By Type"
+          onSelect={selectByType}
+          onDeselect={deselectByType}
+        />
+        <SelectByTagControl onSelect={selectByTag} onDeselect={deselectByTag} />
       </div>
+
+      <TagFilterBar
+        tagFilters={tagFilters}
+        onToggle={(name) => setTagFilters(prev => prev.includes(name) ? prev.filter(t => t !== name) : [...prev, name])}
+        onClear={() => setTagFilters([])}
+      />
 
       <div className="relative">
         {/* Loading overlay to prevent interaction during bulk operations */}
@@ -3947,33 +5210,46 @@ function CatalogsSettingsContent({
         )}
         
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-          <SortableContext items={catalogItemIds} strategy={verticalListSortingStrategy}>
+          <SortableContext
+            items={catalogItemIds}
+            strategy={isLargeList ? undefined : verticalListSortingStrategy}
+          >
             <div className="space-y-2">
-            <AnimatePresence mode="popLayout" initial={false}>
-            {filteredCatalogs.map((catalog, index) => (
-              <motion.div
-                key={`${catalog.id}-${catalog.type}`}
-                layout
-                initial={{ opacity: 0, y: -8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.96, transition: { duration: 0.15 } }}
-                transition={{
-                  duration: 0.2,
-                  delay: isInitialMount.current ? Math.min(index * 0.015, 0.5) : 0,
-                }}
-              >
-              <SortableCatalogItem
-                catalog={catalog}
-                onEditDiscover={(cat) => {
-                  setEditingDiscoverCatalog(cat);
-                  setIsTmdbDiscoverBuilderOpen(true);
-                }}
-                onCustomize={DEFAULT_CATALOG_TEMPLATES[catalog.id] ? handleCustomize : undefined}
-                onDuplicateDiscover={handleDuplicateDiscover}
-              />
-              </motion.div>
-            ))}
-            </AnimatePresence>
+            {filteredCatalogs.map((catalog) => {
+              const row = catalog.source === 'merged' ? (
+                <MergedCatalogCard
+                  catalog={catalog}
+                  allCatalogs={config.catalogs}
+                  onDisband={() => handleDisbandMerge(catalog)}
+                />
+              ) : (
+                <SortableCatalogItem
+                  catalog={catalog}
+                  onEditDiscover={handleEditDiscover}
+                  onCustomize={DEFAULT_CATALOG_TEMPLATES[catalog.id] ? handleCustomize : undefined}
+                  onDuplicateDiscover={handleDuplicateDiscover}
+                />
+              );
+              const key = `${catalog.id}-${catalog.type}`;
+
+              // Layout animation measures every row on each change, which a list
+              // this long cannot absorb.
+              return isLargeList ? (
+                <div key={key}>{row}</div>
+              ) : (
+                <motion.div
+                  key={key}
+                  layout
+                  initial={{ opacity: 0, y: -8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{
+                    duration: 0.2,
+                  }}
+                >
+                  {row}
+                </motion.div>
+              );
+            })}
             </div>
           </SortableContext>
         </DndContext>
@@ -3996,6 +5272,10 @@ function CatalogsSettingsContent({
       <SimklIntegration
         isOpen={isSimklOpen}
         onClose={() => setIsSimklOpen(false)}
+      />
+      <MovieLensIntegration
+        isOpen={isMovieLensOpen}
+        onClose={() => setIsMovieLensOpen(false)}
       />
       <PublicMetaDBIntegration
         isOpen={isPublicMetaDBOpen}
@@ -4025,6 +5305,10 @@ function CatalogsSettingsContent({
         isOpen={isAICatalogOpen}
         onClose={() => setIsAICatalogOpen(false)}
       />
+      <CollectionBuilderDialog
+        isOpen={isCollectionBuilderOpen}
+        onClose={() => setIsCollectionBuilderOpen(false)}
+      />
       <DiscoverBuilderDialog
         isOpen={isTmdbDiscoverBuilderOpen}
         onClose={() => {
@@ -4036,6 +5320,124 @@ function CatalogsSettingsContent({
         customizeTemplate={customizeTemplate}
       />
 
+      {/* Merge Dialog */}
+      <Dialog open={showMergeDialog} onOpenChange={setShowMergeDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Merge {selectedCatalogs.length} Catalogs</DialogTitle>
+            <DialogDescription>
+              The selected catalogs will appear as one combined catalog in Stremio.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label htmlFor="merge-name">Name</Label>
+              <Input
+                id="merge-name"
+                value={mergeName}
+                onChange={e => setMergeName(e.target.value)}
+                placeholder="Merged Catalog"
+                autoFocus
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="merge-display-type">Display Type (optional)</Label>
+              <Input
+                id="merge-display-type"
+                value={mergeDisplayType}
+                onChange={e => setMergeDisplayType(e.target.value)}
+                placeholder={(() => {
+                  const types = new Set(selectedCatalogs.map(c => c.type));
+                  return types.size === 1 ? [...types][0] : 'all';
+                })()}
+              />
+            </div>
+            <div className="flex items-center justify-between">
+              <Label htmlFor="merge-home">Show in Home Board</Label>
+              <Switch
+                id="merge-home"
+                checked={mergeShowInHome}
+                onCheckedChange={setMergeShowInHome}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Merge Mode</Label>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setMergeMode('interleaved')}
+                  className={`flex-1 rounded-md border p-2.5 text-left transition-colors ${
+                    mergeMode === 'interleaved'
+                      ? 'border-primary bg-primary/10'
+                      : 'border-border hover:border-primary/50'
+                  }`}
+                >
+                  <p className="text-sm font-medium">Interleaved</p>
+                  <p className="text-xs text-muted-foreground">Mix items from all sources (A B A B)</p>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMergeMode('sequential')}
+                  className={`flex-1 rounded-md border p-2.5 text-left transition-colors ${
+                    mergeMode === 'sequential'
+                      ? 'border-primary bg-primary/10'
+                      : 'border-border hover:border-primary/50'
+                  }`}
+                >
+                  <p className="text-sm font-medium">Sequential</p>
+                  <p className="text-xs text-muted-foreground">Show all of source A, then B, etc.</p>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMergeMode('alternating')}
+                  className={`flex-1 rounded-md border p-2.5 text-left transition-colors ${
+                    mergeMode === 'alternating'
+                      ? 'border-primary bg-primary/10'
+                      : 'border-border hover:border-primary/50'
+                  }`}
+                >
+                  <p className="text-sm font-medium">Alternating</p>
+                  <p className="text-xs text-muted-foreground">Page 1 = A, page 2 = B, cycle</p>
+                </button>
+              </div>
+            </div>
+            <div className="text-xs text-muted-foreground">
+              Type preview: <code className="font-mono">{
+                (new Set(selectedCatalogs.map(c => c.type)).size === 1)
+                  ? selectedCatalogs[0]?.type
+                  : 'all'
+              }</code>
+            </div>
+            <div className="border rounded p-2 max-h-48 overflow-y-auto space-y-1">
+              {selectedCatalogs.map(c => {
+                const styleClass = sourceBadgeStyles[c.source as keyof typeof sourceBadgeStyles] || 'bg-gray-700';
+                return (
+                  <div key={`${c.id}-${c.type}`} className="flex items-center gap-2 text-sm">
+                    <Badge variant="outline" className={`text-[10px] ${styleClass}`}>
+                      {sourceBadgeLabels[c.source] || c.source.toUpperCase()}
+                    </Badge>
+                    <span className="truncate">{c.name}</span>
+                    <Badge variant="outline" className="text-[10px] capitalize ml-auto">
+                      {c.displayType || c.type}
+                    </Badge>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setShowMergeDialog(false)}>Cancel</Button>
+            <Button
+              onClick={handleConfirmMerge}
+              disabled={!mergeName.trim() || selectedCatalogs.length < 2}
+            >
+              <GitMerge className="h-4 w-4 mr-1" />
+              Create Merged Catalog
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       {/* Bulk Delete Confirmation Dialog */}
       <ConfirmDialog
         isOpen={showDeleteConfirmDialog}
@@ -4043,10 +5445,20 @@ function CatalogsSettingsContent({
         onConfirm={handleConfirmBulkDelete}
         title="Delete Selected Catalogs"
         description={(() => {
-          const catalogsToDelete = selectedCatalogs.filter(isRemovableCatalog);
-          const skippedCount = selectedCatalogs.length - catalogsToDelete.length;
+          const mergedSelected = selectedCatalogs.filter(c => c.source === 'merged');
+          const catalogsToDelete = selectedCatalogs.filter(c => c.source !== 'merged' && isRemovableCatalog(c));
+          const skippedCount = selectedCatalogs.length - mergedSelected.length - catalogsToDelete.length;
 
-          let message = `Are you sure you want to delete ${catalogsToDelete.length} catalog${catalogsToDelete.length === 1 ? '' : 's'}?`;
+          const parts: string[] = [];
+          if (catalogsToDelete.length > 0) {
+            parts.push(`delete ${catalogsToDelete.length} catalog${catalogsToDelete.length === 1 ? '' : 's'}`);
+          }
+          if (mergedSelected.length > 0) {
+            parts.push(`disband ${mergedSelected.length} merged catalog${mergedSelected.length === 1 ? '' : 's'}`);
+          }
+          let message = parts.length > 0
+            ? `This will ${parts.join(' and ')}.`
+            : 'Nothing selected to delete.';
 
           if (catalogsToDelete.length > 0 && catalogsToDelete.length <= 10) {
             const catalogNames = catalogsToDelete.map(c => `• ${c.name}`).join('\n');
@@ -4054,6 +5466,11 @@ function CatalogsSettingsContent({
           } else if (catalogsToDelete.length > 10) {
             const firstTen = catalogsToDelete.slice(0, 10).map(c => `• ${c.name}`).join('\n');
             message += `\n\n${firstTen}\n• ...and ${catalogsToDelete.length - 10} more`;
+          }
+
+          if (mergedSelected.length > 0 && mergedSelected.length <= 5) {
+            const names = mergedSelected.map(c => `• ${c.name} (merged)`).join('\n');
+            message += `\n\n${names}`;
           }
 
           if (skippedCount > 0) {
@@ -4362,6 +5779,7 @@ function CatalogsSettingsContent({
 export function CatalogsSettings() {
   const { config, hasBuiltInTvdb, setConfig } = useConfig();
   const [hideDisabledCatalogs, setHideDisabledCatalogs] = useState(config.showDisabledCatalogs ?? false);
+  const [tagFilters, setTagFilters] = useState<string[]>([]);
 
   useEffect(() => {
     setHideDisabledCatalogs(config.showDisabledCatalogs ?? false);
@@ -4378,17 +5796,22 @@ export function CatalogsSettings() {
   // Compute filtered catalogs to pass to SelectionProvider
   const filteredCatalogs = useMemo(() =>
     config.catalogs.filter(cat => {
+      // Absorbed catalogs remain visible so they can be merged elsewhere
+
       // Filter out disabled catalogs if hideDisabledCatalogs is true
       if (hideDisabledCatalogs && !cat.enabled) return false;
 
       // Filter out TVDB catalogs if no TVDB key is available
       if (cat.source === 'tvdb' && !hasTvdbKey) return false;
 
+      // Filter by selected tags (match any)
+      if (tagFilters.length > 0 && !tagFilters.some(t => cat.tags?.includes(t))) return false;
+
       if (cat.source !== "streaming") return true;
       const serviceId = cat.id.replace("streaming.", "").replace(/ .*/, "");
       return Array.isArray(config.streaming) && config.streaming.includes(serviceId);
     }),
-    [config.catalogs, config.streaming, hideDisabledCatalogs, hasTvdbKey]
+    [config.catalogs, config.streaming, hideDisabledCatalogs, hasTvdbKey, tagFilters]
   );
 
   return (
@@ -4396,6 +5819,8 @@ export function CatalogsSettings() {
       <CatalogsSettingsContent
         hideDisabledCatalogs={hideDisabledCatalogs}
         setHideDisabledCatalogs={handleSetHideDisabled}
+        tagFilters={tagFilters}
+        setTagFilters={setTagFilters}
       />
     </SelectionProvider>
   );

@@ -2,6 +2,499 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [2.12.0](https://github.com/cedya77/aiometadata/compare/v2.11.0...v2.12.0) (2026-08-07)
+
+
+### Features
+
+* **auth:** require signing in to reach the config page and its API ([ea8983c](https://github.com/cedya77/aiometadata/commit/ea8983cbddebdc0f44fdf9a8c44c05934f97042d))
+* **builder:** collapse the advisory banners into one status bar ([47ae36d](https://github.com/cedya77/aiometadata/commit/47ae36dc11cfde57deb3f27555bf22e6cfa49368))
+* **builder:** give the builder a full-screen shell with a pinned footer ([204fab9](https://github.com/cedya77/aiometadata/commit/204fab991ce5601d08394ab0b9c95fedb7b8302d))
+* **builder:** put folders in the rail and lift selection to the dialog ([0f51ed2](https://github.com/cedya77/aiometadata/commit/0f51ed2d081f7c2dbad09f60b0d327d0fadf43f3))
+* **builder:** report which folders a rail query matched ([f6581fb](https://github.com/cedya77/aiometadata/commit/f6581fb4cfa1213880f63c443438f45b3afda245))
+* **collections:** carry a catalog's own type through an export so an import can match it ([0f96c15](https://github.com/cedya77/aiometadata/commit/0f96c15d8c93d86abd53a88c927153c350c33957))
+* **collections:** derive one save stage for the builder ([b5d5993](https://github.com/cedya77/aiometadata/commit/b5d599318f6ff8ba9d76ef69c9608ceca3720b74))
+* **collections:** dock the preview beside the editor on wide screens ([9f495c1](https://github.com/cedya77/aiometadata/commit/9f495c1fb8f846dfd4822e0753c9497cd223537b))
+* **collections:** give the entry rail room to read and a filter ([1c62954](https://github.com/cedya77/aiometadata/commit/1c62954463ecaad36dafa2da7cf14b6940130a69))
+* **collections:** label an excluded entry instead of only dimming it ([7c595c8](https://github.com/cedya77/aiometadata/commit/7c595c8dc7aa56b3bc1fa1c91f8862864e6e6917))
+* **collections:** make deleting undoable and confirm a replacing import ([dd7d833](https://github.com/cedya77/aiometadata/commit/dd7d833165239a212d0116e94aeafa0eb4371eb9))
+* **collections:** make the builder a full-height sheet on small screens ([4045049](https://github.com/cedya77/aiometadata/commit/4045049a77e661ce1feeb1fe6c9e8d5fab2c7618))
+* **collections:** merge an imported file into what it shares an id with ([6b4adca](https://github.com/cedya77/aiometadata/commit/6b4adca4d56c1276490f987d4f6288c28a587121))
+* **collections:** name the addons an exported file needs installed ([f7bcd94](https://github.com/cedya77/aiometadata/commit/f7bcd9487ee5462f593d879243a9d1c18676b027))
+* **collections:** name the same thing the same way on both targets ([519f3db](https://github.com/cedya77/aiometadata/commit/519f3db3ab4ff23f1cffcb05f6102e03cd26f579))
+* **collections:** number repeated copies instead of stacking the word ([f26d870](https://github.com/cedya77/aiometadata/commit/f26d8707041f7fd710742034e78748420b016424))
+* **collections:** offer starter layouts instead of an empty rail ([9ce58b7](https://github.com/cedya77/aiometadata/commit/9ce58b7e1bf6a8b5e1587fc02160d54e91e86f68))
+* **collections:** put the manifest source where it can be acted on ([2ad390e](https://github.com/cedya77/aiometadata/commit/2ad390efa77d20190834c6ca9ef12bd207fa7710))
+* **collections:** rank builder problems by severity ([82884a3](https://github.com/cedya77/aiometadata/commit/82884a37016a11327b531ffe291b1d37e2f58d25))
+* **collections:** rework the builder into panes with a ranked issue list ([4308a7a](https://github.com/cedya77/aiometadata/commit/4308a7a30dd95808ca32bd68d77a0a3e9a328182))
+* **collections:** save the builder in one step instead of three ([ae3e281](https://github.com/cedya77/aiometadata/commit/ae3e281f4244bc36cebaaaaf856b7f9874158cbd))
+* **collections:** show one ranked issue list and put its verdict on save ([32769bf](https://github.com/cedya77/aiometadata/commit/32769bf141632be1b444e4dc951fdcac4f048655))
+* **collections:** warn on a classic row whose type Fusion will not import ([bf8d979](https://github.com/cedya77/aiometadata/commit/bf8d97939ba40d963158dc9648d9d88ebfea92eb))
+
+
+### Bug Fixes
+
+* **anime:** honour a zero delay instead of treating it as unset ([638d5da](https://github.com/cedya77/aiometadata/commit/638d5da5566869d2e608de92c40e01e4890cbd71))
+* **art proxy:** answer 404 when the poster proxy has no fallback to redirect to ([90dd65d](https://github.com/cedya77/aiometadata/commit/90dd65d1cf17386d844ce6eff3715035d4c0bc52))
+* **builder:** act on the real folder index when the rail is filtered ([3255983](https://github.com/cedya77/aiometadata/commit/32559832efd579a39ae34bf0681a5694fef8540d))
+* **builder:** drop the breadcrumb when nothing is selected ([e54a9d9](https://github.com/cedya77/aiometadata/commit/e54a9d91f19429c5aae29e25d88d1c3ca275e414))
+* **builder:** drop the dialog padding above the small breakpoint ([6b55b5d](https://github.com/cedya77/aiometadata/commit/6b55b5d0691e7d9b498dd7b43abd173dec67f972))
+* **builder:** expand the selected entry when the dialog reopens ([b1d5988](https://github.com/cedya77/aiometadata/commit/b1d5988ba47c176f3572fe0f801ed7abed17561e))
+* **builder:** focus the title of a folder you just added ([3d92d2e](https://github.com/cedya77/aiometadata/commit/3d92d2e4751d64245fe0a55c7b1995c8bedaa68d))
+* **builder:** give the footer and the editor a container to query ([e9b2c68](https://github.com/cedya77/aiometadata/commit/e9b2c68387e4c086a22588ff20e4e422e7f02e26))
+* **builder:** keep the preview reachable below the widest layout ([45c492f](https://github.com/cedya77/aiometadata/commit/45c492f7c9b91fdc156f3c858b03960602429961))
+* **builder:** let a folder drag land in another collection ([ab0ee6c](https://github.com/cedya77/aiometadata/commit/ab0ee6c5514b78214f1a1b5c6769bb4d8522cf6d))
+* **builder:** let folder rows reorder by drag again ([acb6251](https://github.com/cedya77/aiometadata/commit/acb6251e8707525017c8fb0bca7243595df9fd5e))
+* **builder:** restore preview section & un-truncate catalog names ([fccb85e](https://github.com/cedya77/aiometadata/commit/fccb85e36dc6900842a82b5dc5a1434051a8831c))
+* **builder:** show the folders the rail filter matched ([a7e1ac2](https://github.com/cedya77/aiometadata/commit/a7e1ac29e5870ce2fde2f6682d2214e652c2aed5))
+* **builder:** show the row controls where nothing can hover ([53f8c07](https://github.com/cedya77/aiometadata/commit/53f8c07d61bf855e76e76e36841ff5ab9fa3f3d8))
+* **builder:** stop source row meta overflowing the delete button ([82a6414](https://github.com/cedya77/aiometadata/commit/82a641473f96b7cc6efa0600071b52daa166c64a))
+* **builder:** stop the header and footer crowding out the panes ([01feef5](https://github.com/cedya77/aiometadata/commit/01feef56f00f16f3606db8eae360f967e68768d4))
+* **cache:** pass the key to the classifier so a Jikan object is not read as empty ([114ff36](https://github.com/cedya77/aiometadata/commit/114ff3676b3579b9afd7369de42f70cd0e42476f))
+* **catalogs:** resolve a catalog whose display type suffix is _all ([eaade76](https://github.com/cedya77/aiometadata/commit/eaade76900520bdf9000654f8cc3e3bce66813d7))
+* **collections:** carry a source genre through the Fusion export and back ([da2a388](https://github.com/cedya77/aiometadata/commit/da2a388bc48a3cc12d534494b6f75ca3b5a3da2e))
+* **collections:** drop the resets for state the save mode replaced ([598baac](https://github.com/cedya77/aiometadata/commit/598baaca712b79609768e332ccfc8712c01667a8))
+* **collections:** give an imported entry a free id when the file's is taken ([d6165c5](https://github.com/cedya77/aiometadata/commit/d6165c562f3f8454ed2e65c35c334aa2a4c94534))
+* **collections:** keep a personal PublicMetaDB list out of a shared catalog ([0f02825](https://github.com/cedya77/aiometadata/commit/0f02825c58d81dbd44d7c2d41c4525f5c4bf77ee))
+* **collections:** keep a picker selection when the filters change ([0211926](https://github.com/cedya77/aiometadata/commit/0211926b7ef98ffe0079c3a1f7d551fd3da7c292))
+* **collections:** keep Enter on a picker button doing that button's job ([de1aae9](https://github.com/cedya77/aiometadata/commit/de1aae908f1a45e9211efe977b9173d8073d8f93))
+* **collections:** keep ids joinable when a Fusion export prefixes them ([3849fd2](https://github.com/cedya77/aiometadata/commit/3849fd25c67c07ed568e6abc1d6e7114c55de6f5))
+* **collections:** keep the entry filter reachable once it is set ([4ecab06](https://github.com/cedya77/aiometadata/commit/4ecab06984d17c8f64075fcb6ff2bb0ecda29e44))
+* **collections:** keep the export payload to the fields Fusion expects ([3bf2fb0](https://github.com/cedya77/aiometadata/commit/3bf2fb0e05a15bd269915d13af3b0c9e05e28c7e))
+* **collections:** make the picker's filter chips reachable by keyboard ([d99804b](https://github.com/cedya77/aiometadata/commit/d99804b6a61b44a148af65d5febb7faac6dbf0fe))
+* **collections:** match a manifest catalog whose type differs only in case ([0e01e96](https://github.com/cedya77/aiometadata/commit/0e01e962f43452a3a1344fa5dc291859e54dceaf))
+* **collections:** match a suffixed catalog on its original type, not its display type ([f74f571](https://github.com/cedya77/aiometadata/commit/f74f57111841eee1558b9ea72bbe59c397cd3772))
+* **collections:** name Fusion's word in every alias hint ([fd691af](https://github.com/cedya77/aiometadata/commit/fd691af4fa0f4aded8f7c7fa23a79345247859da))
+* **collections:** only ask for a genre where the catalog needs one, and start it on the declared default ([2cc967e](https://github.com/cedya77/aiometadata/commit/2cc967efb29b08e6170ebce55d3e7b1266dae81c))
+* **collections:** point a source problem at the folder holding it ([0c332bb](https://github.com/cedya77/aiometadata/commit/0c332bb88144d5b9125a2e94078b249a53f088b1))
+* **collections:** point an imported source at the id this manifest serves ([885a99b](https://github.com/cedya77/aiometadata/commit/885a99b73866c9113af518afd1d2c8ac402c0105))
+* **collections:** route apply and close through the save gates ([c4e1376](https://github.com/cedya77/aiometadata/commit/c4e1376d872a1a6f789f4fc62e3940ddd36e71a0))
+* **collections:** say when the save cannot reach the server ([206ddf3](https://github.com/cedya77/aiometadata/commit/206ddf318c3640771266a2c37ee03de4aee7768f))
+* **collections:** stop a catalog waiting on an account reading as staged ([ed63504](https://github.com/cedya77/aiometadata/commit/ed635049831701473ef30c8f6695cf0ee741b11f))
+* **collections:** stop an imported file rebuilding someone else's personal list ([69d87a7](https://github.com/cedya77/aiometadata/commit/69d87a7518645ef749257948839114a06dada94f))
+* **collections:** stop export notes reading as a missing catalog ([6f45940](https://github.com/cedya77/aiometadata/commit/6f4594060c0d294b95bbda65c842f9231097263c))
+* **collections:** stop offering starters there are none of ([e8c4ded](https://github.com/cedya77/aiometadata/commit/e8c4dedf6664da5cc412ebd8f48929ab73954cea))
+* **collections:** stop the builder reselecting what you already typed ([e45668b](https://github.com/cedya77/aiometadata/commit/e45668b1df05cbe2842143f6b0ec1b83cb97a9f7))
+* **collections:** stop the pointer stealing the picker's keyboard selection ([aafe970](https://github.com/cedya77/aiometadata/commit/aafe97032c70fd7f0951981383295bc666819a84))
+* **collections:** stop the save shortcut firing from a nested dialog ([3fff28d](https://github.com/cedya77/aiometadata/commit/3fff28d193a81455daacbc21ebc0cd819f0ea360))
+* **collections:** undo only the delete it was offered for ([f71ecbb](https://github.com/cedya77/aiometadata/commit/f71ecbb68c835ea670a5be71ae22c71adde7dce1))
+* **search:** keep MDBList's ranking through the batch enrichment ([cebecc8](https://github.com/cedya77/aiometadata/commit/cebecc8fe43f4a5fa00cad9bb672e85fc8ce043f))
+
+
+### Performance Improvements
+
+* **anime:** cache episode pages separately instead of the whole list ([7faba54](https://github.com/cedya77/aiometadata/commit/7faba543bbc9cd9ab581d6ede594e7a6161d3b9b))
+* **collections:** stop restringifying the draft on every parent render ([b2f9a24](https://github.com/cedya77/aiometadata/commit/b2f9a24a79708e9ba2b76c983a27a02b12f7470e))
+
+## [2.11.0](https://github.com/cedya77/aiometadata/compare/v2.10.0...v2.11.0) (2026-08-06)
+
+
+### Features
+
+* allow for per-provider policies in proxy-only environments ([9e50b45](https://github.com/cedya77/aiometadata/commit/9e50b45e7e96db9308ff4aad267c93193687d177))
+* allow for per-provider policies in proxy-only environments ([e8a85fc](https://github.com/cedya77/aiometadata/commit/e8a85fcb82751a66f0c693863a02be9d03265131))
+* **auth:** add OpenID Connect sign-in ([3af2e06](https://github.com/cedya77/aiometadata/commit/3af2e0604af8e67528c67d64a5ae453845528e7c))
+* **auth:** let an administrator session reach the dashboard ([3af2e06](https://github.com/cedya77/aiometadata/commit/3af2e0604af8e67528c67d64a5ae453845528e7c))
+* **auth:** open a configuration saved to an account without its password ([3af2e06](https://github.com/cedya77/aiometadata/commit/3af2e0604af8e67528c67d64a5ae453845528e7c))
+* **auth:** sign in with an identity provider and reach your configurations ([3af2e06](https://github.com/cedya77/aiometadata/commit/3af2e0604af8e67528c67d64a5ae453845528e7c))
+* **dashboard:** add an accounts panel for identity provider sign-ins ([c4f5946](https://github.com/cedya77/aiometadata/commit/c4f59466a3c071381bd269531b9fba4774dde7df))
+* **discover:** add Today and This Week date presets ([2a7d3d1](https://github.com/cedya77/aiometadata/commit/2a7d3d1861e9bc45314b291578f23216f511b8ad))
+* Hide Stremio-specific catalogs ([d13e887](https://github.com/cedya77/aiometadata/commit/d13e8878b0191487425d1fad775805f63afd3eed))
+* Hide Stremio-specific catalogs ([fcef660](https://github.com/cedya77/aiometadata/commit/fcef66005d35080e3d75ac649d8467044f326c77))
+* **mdblist:** offer score filters on every list catalog ([6f0bf01](https://github.com/cedya77/aiometadata/commit/6f0bf0130f294191e5ed8656719a3440b7b637a8))
+* **mdblist:** use quick_search on the search endpoint ([2c1a481](https://github.com/cedya77/aiometadata/commit/2c1a4810c1d9efb0650ece14b5014140866dfd60))
+* **sso:** apply group mapping changes to live sessions ([03e6b37](https://github.com/cedya77/aiometadata/commit/03e6b3731884cfafa6393da9ae0ad765a2469875))
+* **sso:** confirm settings changes that would remove your own access ([97c81e6](https://github.com/cedya77/aiometadata/commit/97c81e61c479deeb5ef84832374423357fe973ac))
+* **sso:** expose account sessions, configurations and deletion ([46328b8](https://github.com/cedya77/aiometadata/commit/46328b8bc489f1f9f1b2a668d6bb8e3568afeadf))
+* **sso:** let an admin revoke an account's sessions ([a180a7b](https://github.com/cedya77/aiometadata/commit/a180a7be60599e4e9c467567d3b5639bbf6105e0))
+
+
+### Bug Fixes
+
+* **admin:** require authentication on every admin route ([3af2e06](https://github.com/cedya77/aiometadata/commit/3af2e0604af8e67528c67d64a5ae453845528e7c))
+* **catalogs:** keep the catalog list responsive when it is long ([329c4b9](https://github.com/cedya77/aiometadata/commit/329c4b94703ce463b3bc26756c07cc3ff50463e4))
+* **collections:** apply the digital release and unknown-source checks to the right sources ([329c4b9](https://github.com/cedya77/aiometadata/commit/329c4b94703ce463b3bc26756c07cc3ff50463e4))
+* **collections:** carry catalogs with a shared collection ([329c4b9](https://github.com/cedya77/aiometadata/commit/329c4b94703ce463b3bc26756c07cc3ff50463e4))
+* **collections:** embed catalog definitions in the exported collections ([329c4b9](https://github.com/cedya77/aiometadata/commit/329c4b94703ce463b3bc26756c07cc3ff50463e4))
+* **collections:** give rebuilt discover catalogs a form state ([329c4b9](https://github.com/cedya77/aiometadata/commit/329c4b94703ce463b3bc26756c07cc3ff50463e4))
+* **collections:** hold imported catalogs until the design is applied ([329c4b9](https://github.com/cedya77/aiometadata/commit/329c4b94703ce463b3bc26756c07cc3ff50463e4))
+* **collections:** make routing Nuvio's own sources through the addon opt-in ([329c4b9](https://github.com/cedya77/aiometadata/commit/329c4b94703ce463b3bc26756c07cc3ff50463e4))
+* **collections:** rebuild catalogs from a Nuvio collection file ([329c4b9](https://github.com/cedya77/aiometadata/commit/329c4b94703ce463b3bc26756c07cc3ff50463e4))
+* **collections:** recreate account catalogs from their id ([329c4b9](https://github.com/cedya77/aiometadata/commit/329c4b94703ce463b3bc26756c07cc3ff50463e4))
+* **collections:** stop a Fusion export silently dropping most of a design ([329c4b9](https://github.com/cedya77/aiometadata/commit/329c4b94703ce463b3bc26756c07cc3ff50463e4))
+* **collections:** stop an import exceeding the catalog ceiling ([329c4b9](https://github.com/cedya77/aiometadata/commit/329c4b94703ce463b3bc26756c07cc3ff50463e4))
+* **config:** rate limit profile saves per configuration ([62343a3](https://github.com/cedya77/aiometadata/commit/62343a3638db5c95d0d170209983a7b020bef509))
+* **dashboard:** let an SSO instance reach the dashboard without an admin key ([133814e](https://github.com/cedya77/aiometadata/commit/133814eaa9f8ae426dd3037051e16ff29f26b909))
+* **dashboard:** reach the accounts panel on mobile and report what its actions did ([bdb1e66](https://github.com/cedya77/aiometadata/commit/bdb1e66b68790ebe266f28db66af2a3272312e77))
+* **dashboard:** report heap usage against the limit V8 enforces ([ec183ff](https://github.com/cedya77/aiometadata/commit/ec183ff4e415c5a5e4594ade7f32b6a4439ee2f7))
+* **dashboard:** say how to reach the dashboard when no admin key is set ([f43b5b5](https://github.com/cedya77/aiometadata/commit/f43b5b5fc187a0ad4765b4abbc1d517dcb187234))
+* **docs:** run self-hosted Jikan search on Typesense ([a5cda44](https://github.com/cedya77/aiometadata/commit/a5cda44bd83d9fde35f9eabf2f22eceba606f3f1))
+* **image cache:** stop image provider connections piling up TLS sessions ([dbbd875](https://github.com/cedya77/aiometadata/commit/dbbd8754ab9015fbd68fe97826b7243edcb62564))
+* **meta:** build deep links from the identifier the client installed ([097c676](https://github.com/cedya77/aiometadata/commit/097c67653463a599d8d0cbda61c390e899526935))
+* **movielens:** fix movielens sign up url ([76d3754](https://github.com/cedya77/aiometadata/commit/76d37548d55ee4a804f7dbbf53231c4564433438))
+* **settings:** register TRUST_PROXY_HOPS in the settings registry ([187ff67](https://github.com/cedya77/aiometadata/commit/187ff671057192a2ddfe41c95399c257a3636720))
+* **sso:** bind an OIDC sign-in to the browser that started it ([3c531e1](https://github.com/cedya77/aiometadata/commit/3c531e1a73e9cf5765987ae6e13b5e01a49801e9))
+* **sso:** bound how many sign-in failures the log will keep and read ([7b781dd](https://github.com/cedya77/aiometadata/commit/7b781dd018726dd213195dd49d854c397514470d))
+* **sso:** close the window where a sign-in outlives the block that hit it ([8d5ca17](https://github.com/cedya77/aiometadata/commit/8d5ca178c0aff0886395fd124095d6722b61b6f4))
+* **sso:** delete the account row before sweeping its sessions ([255a2f5](https://github.com/cedya77/aiometadata/commit/255a2f58c544551478adecbca778f323964e81f8))
+* **sso:** delete the payloads a trimmed failure index leaves behind ([89afe3f](https://github.com/cedya77/aiometadata/commit/89afe3fcc1e7474975bde1a729c9b8f9d9bedafa))
+* **sso:** destroy the minted session when the block re-read throws ([648f323](https://github.com/cedya77/aiometadata/commit/648f3230c4e6e85ebb22627f9b0c8bcff3b0c5b5))
+* **sso:** honour AUTH_SIGNIN_FAILURE_LOG_MAX when listing failures ([8eeb5e3](https://github.com/cedya77/aiometadata/commit/8eeb5e35d9e444a4870fd5bb9151c0dc4d26ff27))
+* **sso:** keep a rate-limited request refused when recording it fails ([ff3b798](https://github.com/cedya77/aiometadata/commit/ff3b7988843b841e0761e6ae9fa748dcef7a7247))
+* **sso:** keep refusals visible and sign-ins tied to a live account ([e0f5e46](https://github.com/cedya77/aiometadata/commit/e0f5e46aab857973e00ad71e2fa4abe3e93a0032))
+* **sso:** make account revocation authoritative again ([884430d](https://github.com/cedya77/aiometadata/commit/884430dbd138b6a45afa9d704b5f5572289031b4))
+* **sso:** make the self-demotion guard model a settings reset correctly ([9a22467](https://github.com/cedya77/aiometadata/commit/9a224678879293089cb1e447ccfa902013800b9c))
+* **sso:** point an unreadable mapping at the setting, not at every account ([4f3bbce](https://github.com/cedya77/aiometadata/commit/4f3bbce5524d7b0cb82bbb6c302fec0ff364c408))
+* **sso:** rate limit sign-in by an address the client cannot forge ([00911bf](https://github.com/cedya77/aiometadata/commit/00911bf4516f3aa266f3aed96820ff2c180d4b01))
+* **sso:** refuse a post-sign-in redirect that leaves the instance ([976f513](https://github.com/cedya77/aiometadata/commit/976f51318853b319d2a70cb5a3c455acaead008b))
+* **sso:** refuse the login when the group mapping cannot be read ([3540713](https://github.com/cedya77/aiometadata/commit/3540713995c0eb4820d086bcf7f7b057f66e4ab8))
+* **sso:** report a block whose session sweep failed as saved, not failed ([5ebbff3](https://github.com/cedya77/aiometadata/commit/5ebbff3c7544806a93d0cea0c3e09cf27e1ac5a4))
+* **sso:** report the sessions a failed sweep did destroy ([ad78e04](https://github.com/cedya77/aiometadata/commit/ad78e0475f1f784d584ce034b4dff445eb080772))
+* **sso:** say what a settings change does to other admins, per outcome ([d668a2b](https://github.com/cedya77/aiometadata/commit/d668a2b8b27775de837e474b167da187cb9c5cb3))
+* **sso:** separate the parts of a multi-outcome warning with semicolons ([b50d4c3](https://github.com/cedya77/aiometadata/commit/b50d4c30c1326769906a844a9f8c4c50b3f41480))
+* **sso:** stop a full refusal log hiding every provider error ([1ef32b4](https://github.com/cedya77/aiometadata/commit/1ef32b4563a2bfb1c3cc293387690270c6f46f4d))
+* **sso:** stop unauthenticated attempts evicting recorded refusals ([48a84c7](https://github.com/cedya77/aiometadata/commit/48a84c7a76b2f4c9464ebc81268b87604b3f774f))
+* **sso:** tell a refused account apart from an unrecorded one ([ea4aebf](https://github.com/cedya77/aiometadata/commit/ea4aebf9fbd63c074d2711aeb197dbf1c2b725ba))
+* **sso:** tell an admin what a settings change would actually do ([515227c](https://github.com/cedya77/aiometadata/commit/515227ce07769ad0cc885e40b53ea715a5dbcd8d))
+* **sso:** warn that an unreadable mapping refuses everyone, not just admins ([3fb6d57](https://github.com/cedya77/aiometadata/commit/3fb6d57bac8838c70095a53755d6facf0ffd0c24))
+
+
+### Performance Improvements
+
+* **sso:** index sessions per account instead of scanning the keyspace ([8c82f1b](https://github.com/cedya77/aiometadata/commit/8c82f1b05db78ba4f29a464b04a1adf1ce373725))
+
+## [2.10.0](https://github.com/cedya77/aiometadata/compare/v2.9.1...v2.10.0) (2026-08-03)
+
+
+### Features
+
+* add PREFER_SMALLER_POSTERS_TMDB toggle ([d9387b2](https://github.com/cedya77/aiometadata/commit/d9387b2ad657acaddea4694013c0ee9d46ef1a97))
+* add PREFER_SMALLER_POSTERS_TMDB toggle ([51d3401](https://github.com/cedya77/aiometadata/commit/51d3401ed67f4c72a33ee5141f58eba16c5ceffd))
+* **anime:** backfill anime id mappings from animeApi ([b58d50c](https://github.com/cedya77/aiometadata/commit/b58d50ccb279274a2ff992c5303e25a8f0705a31))
+* **art proxy:** guard the passthrough and follow the provider's own validity ([acd7b93](https://github.com/cedya77/aiometadata/commit/acd7b934f5200ff21628f3a5d38b0c61747afe1d))
+* **art proxy:** read CDN-Cache-Control and split the two cache audiences ([baa2309](https://github.com/cedya77/aiometadata/commit/baa2309885c55c46cba4180120188f68c63e33fa))
+* **art:** add landscape url patterns option ([a33d1b7](https://github.com/cedya77/aiometadata/commit/a33d1b70d39e571552dd8b789a2230af0bdf60ea))
+* **catalogs:** allow a per-catalog override of the digital release filter ([dbe40ed](https://github.com/cedya77/aiometadata/commit/dbe40ed200945b3df3e2a728b8f232712438a304))
+* **filters:** hide watched items from Simkl ([dbe40ed](https://github.com/cedya77/aiometadata/commit/dbe40ed200945b3df3e2a728b8f232712438a304))
+* **image cache:** add built-in provider policy ([b12ced8](https://github.com/cedya77/aiometadata/commit/b12ced8c866cf9202f3891aeb41ab7eddc46fa8e))
+* **search:** add IMDb suggestions as a typo tolerant search provider ([bda234f](https://github.com/cedya77/aiometadata/commit/bda234f07c9f43b1dcb2dbf3970d257b12fb8e0a))
+* **search:** add Simkl as a search provider ([9b39cd2](https://github.com/cedya77/aiometadata/commit/9b39cd2af65658fbcd53994faca744357f34ea8c))
+* **search:** add Simkl as an anime search provider ([73b25dd](https://github.com/cedya77/aiometadata/commit/73b25dd7e490ae0ba29ec7881ba1b9eeaa03d051))
+* **search:** build Simkl results from Simkl's own data ([cc1b345](https://github.com/cedya77/aiometadata/commit/cc1b3453b8da751af9ffbcbb73d159e2544fee92))
+* **ui:** save from any settings section ([31f9540](https://github.com/cedya77/aiometadata/commit/31f9540f3a41d14ef3fd7fd3653c3e6a9f34d5ff))
+
+
+### Bug Fixes
+
+* **admin:** serve the user export route before the :userUUID wildcard ([86281f4](https://github.com/cedya77/aiometadata/commit/86281f406bccd20917b0b63cc4cdcd600d6fc527))
+* **anime:** fetch release dates regardless of the digital release filter ([dbe40ed](https://github.com/cedya77/aiometadata/commit/dbe40ed200945b3df3e2a728b8f232712438a304))
+* **art proxy:** relay the provider's CDN-Cache-Control when following it ([9c6a829](https://github.com/cedya77/aiometadata/commit/9c6a829132bd3d7643ccecb5fcd2dd09d0d54fb5))
+* **art proxy:** relay the provider's CDN-Cache-Control when following it ([b2e8f68](https://github.com/cedya77/aiometadata/commit/b2e8f68ce50b311c79548b59a4e1e929efce9fe2))
+* **art proxy:** stop overriding the client and CDN cache contract ([3c5583f](https://github.com/cedya77/aiometadata/commit/3c5583f5df49c02ca5d871fd4283a808681c9bb7))
+* **collections:** keep the genre when importing a Fusion export ([77150fc](https://github.com/cedya77/aiometadata/commit/77150fcecf3bda4313252557c42fd36e4d7ea228))
+* **dashboard:** report image warming per run instead of per process ([37a4b72](https://github.com/cedya77/aiometadata/commit/37a4b72850fd45a19814e232d4ae6f2862ea71f1))
+* **dashboard:** show every search provider in the performance tab ([ac8b53b](https://github.com/cedya77/aiometadata/commit/ac8b53b25fe121a31eabf517abf9ce72b28320fb))
+* **filters:** keep hide-watched out of completed and history catalogs ([dbe40ed](https://github.com/cedya77/aiometadata/commit/dbe40ed200945b3df3e2a728b8f232712438a304))
+* further improvements to save configuration gating logic ([2151070](https://github.com/cedya77/aiometadata/commit/215107025a0bfc6d26216785f89d69f13ed668f6))
+* handle cached chunks better between addon updates ([6529450](https://github.com/cedya77/aiometadata/commit/652945086ff7647fc7c402137b7f8f247dda060f))
+* handle cached chunks better between addon updates ([e766e96](https://github.com/cedya77/aiometadata/commit/e766e96bb8d4bad82083a9dfcad5bfcf741a8e85))
+* **mal:** stop the genres catalog hiding everything that is not a TV series ([55192ab](https://github.com/cedya77/aiometadata/commit/55192ab52abd982467de22604776d5cbe189d5fd))
+* **meta:** use TMDB original-language art when no English art exists ([5bd73d3](https://github.com/cedya77/aiometadata/commit/5bd73d33ae6d5d425f2898f1e42465f06e30a3e2))
+* **movielens:** resolve conflict between maxYear and maxFutureDays ([a1eb9ee](https://github.com/cedya77/aiometadata/commit/a1eb9ee1c1112dba41fceeac76606e1deee11924))
+* **movielens:** resolve conflict between maxYear and maxFutureDays ([f8367d3](https://github.com/cedya77/aiometadata/commit/f8367d37514ed1c18695c74fe153a1018564d8f6))
+* **movielens:** sync anime film ratings from Simkl ([a71b65f](https://github.com/cedya77/aiometadata/commit/a71b65f415f37b7ea80ad5d85818272d97fdf480))
+* only require mdblist keys when mdblist catalogs are enabled ([9343f70](https://github.com/cedya77/aiometadata/commit/9343f7083aa6502e1f01b0767c22975c18710752))
+* **search:** flag Trakt search as VIP only ([b39f8cf](https://github.com/cedya77/aiometadata/commit/b39f8cf82091fc89a7cc30edee912645bf992394))
+* **search:** make Simkl search opt-in ([627c874](https://github.com/cedya77/aiometadata/commit/627c874d46c0ea9e1361613ac4a43b820ba3127c))
+* **simkl:** apply SIMKL_ACTIVITIES_TTL without a restart ([dbe40ed](https://github.com/cedya77/aiometadata/commit/dbe40ed200945b3df3e2a728b8f232712438a304))
+* **tmdb:** cache movie and series detail responses ([cc1b345](https://github.com/cedya77/aiometadata/commit/cc1b3453b8da751af9ffbcbb73d159e2544fee92))
+* **warmer:** register IMAGE_WARM_PROXY_BASE ([1dc2481](https://github.com/cedya77/aiometadata/commit/1dc248196b9540d1327edecf0729470a1b95c543))
+* **warmer:** stop refetching every rendered poster each cycle ([a0992ff](https://github.com/cedya77/aiometadata/commit/a0992ff552c904c35078092247f883d502195e87))
+
+## [2.9.1](https://github.com/cedya77/aiometadata/compare/v2.9.0...v2.9.1) (2026-07-30)
+
+
+### Bug Fixes
+
+* **settings:** land on the section instead of the page top ([83ec317](https://github.com/cedya77/aiometadata/commit/83ec31722c62d4c85c1796dd997273a73f1bd381))
+
+## [2.9.0](https://github.com/cedya77/aiometadata/compare/v2.8.0...v2.9.0) (2026-07-30)
+
+
+### Features
+
+* add gemini-3.5-flash-lite, gemini-3.5-flash and gemini-3.6-flash ([99a8dd1](https://github.com/cedya77/aiometadata/commit/99a8dd101dbab483bc44acb1ef0faef26555ba45))
+* add granular control on image caching per-provider ([cee0571](https://github.com/cedya77/aiometadata/commit/cee0571260b82141a95983e21b1507746f49b184))
+* add per-type controls for watch tracking ([5f2f559](https://github.com/cedya77/aiometadata/commit/5f2f55970488d452d498196b3df64f82e851d936))
+* add per-type controls for watch tracking ([aed365a](https://github.com/cedya77/aiometadata/commit/aed365a968c6cf4e148cfaa39e8a2fccfa15f1c9))
+* add POSTER_PROXY_ALLOW_PRIVATE to gate private art hosts ([81e93f1](https://github.com/cedya77/aiometadata/commit/81e93f168e5f9c4450aa0c92e36e91839b3e5f60))
+* add trigger keyword to AI search ([a64097f](https://github.com/cedya77/aiometadata/commit/a64097f5780896fb8adf1dd401e5597a2013d8e8))
+* add trigger keyword to AI search ([3231795](https://github.com/cedya77/aiometadata/commit/32317953bb39dd454a722a07c462dd4535899d5b))
+* **ai-catalog:** add a model selector to the AI Catalog Builder ([99a8dd1](https://github.com/cedya77/aiometadata/commit/99a8dd101dbab483bc44acb1ef0faef26555ba45))
+* **aliases:** resolve human-readable user aliases to UUIDs ([6dbd084](https://github.com/cedya77/aiometadata/commit/6dbd084dcd624315688d05801103ef8b4525cad3))
+* **aliases:** resolve human-readable user aliases to UUIDs ([5cc40bd](https://github.com/cedya77/aiometadata/commit/5cc40bd7a8062c8b2ddc04f5f77acfc31b13f059))
+* allow custom art placeholders to be marked optional ([2ab610c](https://github.com/cedya77/aiometadata/commit/2ab610cfadc5036bb6db5de45d2a4c9de0e8861e))
+* **catalogs:** import and remap existing collection files ([cef456f](https://github.com/cedya77/aiometadata/commit/cef456fd39a77c4a2a9e2c9af3ec34cb861df2fd))
+* **catalogs:** serve collection and widget JSON over HTTP ([cef456f](https://github.com/cedya77/aiometadata/commit/cef456fd39a77c4a2a9e2c9af3ec34cb861df2fd))
+* **catalogs:** visual builder for Nuvio collections and Fusion widgets ([cef456f](https://github.com/cedya77/aiometadata/commit/cef456fd39a77c4a2a9e2c9af3ec34cb861df2fd))
+* clear cached art by media id ([ed8f729](https://github.com/cedya77/aiometadata/commit/ed8f7297015d2a0ebab5ab6dfaa00672c71e6676))
+* configurable poster cache validity period ([667ad07](https://github.com/cedya77/aiometadata/commit/667ad0762888b1719b369db7dd027608cfdc55fb))
+* **dashboard:** clear cache entries by meta id or catalog id ([e2f4f75](https://github.com/cedya77/aiometadata/commit/e2f4f75fe800d6ae37011931a501f55344eb8aa5))
+* experimental aiom image caching engine ([67f33e7](https://github.com/cedya77/aiometadata/commit/67f33e76aac52f927deb219c971e19008df43772))
+* expose the full TMDB discover sort options ([17aed03](https://github.com/cedya77/aiometadata/commit/17aed03a3c0685bbabb6536ad35ce3cb41052b0b))
+* implement meta cold store ([a4f0a65](https://github.com/cedya77/aiometadata/commit/a4f0a6547bfd5d1c55abd397f3fcd0f078b13837))
+* make the art proxy routes' client cache configurable ([667ad07](https://github.com/cedya77/aiometadata/commit/667ad0762888b1719b369db7dd027608cfdc55fb))
+* **movielens:** apply taste tags on non-prediction catalog sorts ([2a12df2](https://github.com/cedya77/aiometadata/commit/2a12df2e333f072e9ce6f2d386c7adb967a899bc))
+* **movielens:** implement "your rated collection" and refactor ([11b72b1](https://github.com/cedya77/aiometadata/commit/11b72b144b50b9ca6de6a8384d558e13dd58b486))
+* **movielens:** import user-created lists as catalogs ([828bd07](https://github.com/cedya77/aiometadata/commit/828bd078b105674f37e6154a44f06700e69de243))
+* **movielens:** multi-user MovieLens recommendations ([fad8105](https://github.com/cedya77/aiometadata/commit/fad8105a7b2dcdc8dd70f1c19c028a120d455b1e))
+* **movielens:** support genre filtering in watchlist catalog ([ace3b70](https://github.com/cedya77/aiometadata/commit/ace3b7027faa87f77f1967dc526d2f962eb2ffe8))
+* **poster-cache:** cache rendered rating and custom-art posters ([1fff141](https://github.com/cedya77/aiometadata/commit/1fff141b797482e5ad8e9f3108893cdc16ecd204))
+* redesign oauth popups ([7f44c91](https://github.com/cedya77/aiometadata/commit/7f44c910c8519f6f47c29e067d23c6fec8dc46fa))
+* reuse cold store dashboard stats for a configurable window ([f8c77df](https://github.com/cedya77/aiometadata/commit/f8c77df72a9ab161967ac76c84711e983ce20078))
+* **settings:** register TMDB rendition toggles ([ab2ccc9](https://github.com/cedya77/aiometadata/commit/ab2ccc9cdbccae0b19f1a6e16710fe70e4d78ce5))
+* show the title when clearing cached entries by ID ([a0983a4](https://github.com/cedya77/aiometadata/commit/a0983a4f7cab3358f1e463e4e1632155e4aa6940))
+* surface image warming on the dashboard ([651f9c7](https://github.com/cedya77/aiometadata/commit/651f9c73d7a8ec02a7d85a67f09bbc059080609d))
+* **tmdb:** add central image rendition helper ([dbea454](https://github.com/cedya77/aiometadata/commit/dbea454aaa87606a5975cc222e1601e2c0a0d07e))
+* **tmdb:** make all rendition toggles opt-in ([10c73b6](https://github.com/cedya77/aiometadata/commit/10c73b6203d813de05c61d28e268011fb1359f5c))
+* **tmdb:** size art-batch logos and backdrops via helper ([19479a9](https://github.com/cedya77/aiometadata/commit/19479a9cfab0041626fe0b74718764f00cb2ecb0))
+* **tmdb:** size landscape posters independently of backgrounds ([f9ce52d](https://github.com/cedya77/aiometadata/commit/f9ce52d6249c3f856f9826c8b359bde520d9b050))
+* **tmdb:** size meta logos and backdrops via helper ([7a95b05](https://github.com/cedya77/aiometadata/commit/7a95b05a5d5f2b22ce483d7c0fddf2883c41f7cc))
+* **tmdb:** size provider logos and backdrops via helper ([cc0848a](https://github.com/cedya77/aiometadata/commit/cc0848a71dbc8248cac45dea69f0f9d90675a3c9))
+* **tmdb:** size search logos and backdrops via helper ([bc514d4](https://github.com/cedya77/aiometadata/commit/bc514d469ecbf11689cb70e1e707c44cfd8913cc))
+* **top10:** broaden service coverage, handle regional variants ([fbe5d75](https://github.com/cedya77/aiometadata/commit/fbe5d7559bb7f89c5e33d0cd0241e69038219895))
+* **top10:** broaden service coverage, handle regional variants ([a1ed440](https://github.com/cedya77/aiometadata/commit/a1ed4404784b0ddb1e48de74712416a762af872b))
+* **tracking:** point users at the login when they enable watch tracking ([c38d88b](https://github.com/cedya77/aiometadata/commit/c38d88b96967f013bfc9400c09d4a6be65256493))
+
+
+### Bug Fixes
+
+* **ai-catalog:** resolve the model against the provider actually used ([99a8dd1](https://github.com/cedya77/aiometadata/commit/99a8dd101dbab483bc44acb1ef0faef26555ba45))
+* **aliases:** back off the alias map refresh after a failed load ([4a34119](https://github.com/cedya77/aiometadata/commit/4a3411992fdc3f65e62a6a52c05da1b442076c3b))
+* **aliases:** hide alias controls when the feature is disabled ([4a34119](https://github.com/cedya77/aiometadata/commit/4a3411992fdc3f65e62a6a52c05da1b442076c3b))
+* **aliases:** keep a missing user_aliases table from breaking the user list ([4a34119](https://github.com/cedya77/aiometadata/commit/4a3411992fdc3f65e62a6a52c05da1b442076c3b))
+* **aliases:** preserve query string encoding when rewriting userUUID ([4a34119](https://github.com/cedya77/aiometadata/commit/4a3411992fdc3f65e62a6a52c05da1b442076c3b))
+* **aliases:** read CONFIG_LOAD_RATE_LIMIT_PER_MIN from the settings registry ([4a34119](https://github.com/cedya77/aiometadata/commit/4a3411992fdc3f65e62a6a52c05da1b442076c3b))
+* **aliases:** require ADMIN_KEY for alias changes ([4a34119](https://github.com/cedya77/aiometadata/commit/4a3411992fdc3f65e62a6a52c05da1b442076c3b))
+* **aliases:** resolve aliases on /api/config/clear-cache ([4a34119](https://github.com/cedya77/aiometadata/commit/4a3411992fdc3f65e62a6a52c05da1b442076c3b))
+* allow rootless users with built-in poster cache enabled ([34be89d](https://github.com/cedya77/aiometadata/commit/34be89d834f005bd20059533466001f5cc2bb07b))
+* allow rootless users with built-in poster cache enabled ([c2f84a2](https://github.com/cedya77/aiometadata/commit/c2f84a28a86d7e35e82ddb004c0ac0b3d2b75861))
+* cache empty movielens list pages ([359a732](https://github.com/cedya77/aiometadata/commit/359a7323ae2ebbf4f7a31ed6c2b4e4b524c2d2a2))
+* **catalogs:** make collection persistence and catalog warnings honest ([cef456f](https://github.com/cedya77/aiometadata/commit/cef456fd39a77c4a2a9e2c9af3ec34cb861df2fd))
+* **dashboard:** keep the logs service filter visible ([cca2179](https://github.com/cedya77/aiometadata/commit/cca2179154e8e7bd5040f4d7e52d7742bdf28bcd))
+* drop the cold store epoch index that turned lookups into scans ([ee42df5](https://github.com/cedya77/aiometadata/commit/ee42df569da670e548ee0006d6ba849248fe8bd4))
+* honor per-class image cache toggles for custom art ([81864a7](https://github.com/cedya77/aiometadata/commit/81864a711ab5026a17d1506dd42b562b1883ab68))
+* hydrate release dates on TVDB movie search results so the digital release filter can act on them ([fa533b2](https://github.com/cedya77/aiometadata/commit/fa533b26ac23f87380a7bb65641e74a1df3cf943))
+* include Simkl activity fingerprint in warmed catalog keys ([e94e3f2](https://github.com/cedya77/aiometadata/commit/e94e3f27b0338e1dbd98b50f8ab9ae46127a8cbf))
+* keep the warmer's freshness test in step with the store ([b9742d4](https://github.com/cedya77/aiometadata/commit/b9742d4059d2512139360c8abbe1304b83016cb0))
+* keep the warmer's freshness test in step with the store ([ec05f8d](https://github.com/cedya77/aiometadata/commit/ec05f8d905741f5943d929ad897fbd4067010d2d))
+* key MovieLens explore catalogs by resolved group tags ([ee2931c](https://github.com/cedya77/aiometadata/commit/ee2931ce299826959877f5d25b5dfcb3f8c9f789))
+* let Refresh accept an art-proxy image URL ([26a9be1](https://github.com/cedya77/aiometadata/commit/26a9be12335121e1de6d15e0927004fa4394c0fa))
+* log cache hits that are answered with a 304 ([71e84b9](https://github.com/cedya77/aiometadata/commit/71e84b929ae1ffe3b3b82db006c5db61e62b98d7))
+* **logo:** cache metahub image-existence checks for the full TTL ([e679561](https://github.com/cedya77/aiometadata/commit/e67956105380ea64d292f48137469f8005c18cb1))
+* **logo:** verify metahub logo fallbacks exist before serving them ([44f90de](https://github.com/cedya77/aiometadata/commit/44f90deafc4684a122fda72c31a3e8156c123324))
+* mal & trakt oauth on multi-replica setups ([afa5205](https://github.com/cedya77/aiometadata/commit/afa52052878e04a715c966a427b748de4f38d400))
+* **meta:** keep IMDB episode ids when a season is missing from Cinemeta ([89be187](https://github.com/cedya77/aiometadata/commit/89be1873d1feec96b1df885aa869bcf945b781ec))
+* paginate Trakt watched fetches and prioritize recently aired shows in unwatched catalog ([415725f](https://github.com/cedya77/aiometadata/commit/415725fb75343839602aac0c9eca8a31c313a6f3))
+* proxy episode thumbnails so clients can load them ([bd96abf](https://github.com/cedya77/aiometadata/commit/bd96abfe03da907222c3c2ab2858b0d882e69d32))
+* proxy episode thumbnails through the art proxy ([2cc7dba](https://github.com/cedya77/aiometadata/commit/2cc7dba8fa769c3dcd29b7677fc64e279cdaee05))
+* replace retired gemini-2.5-flash-lite default ([99a8dd1](https://github.com/cedya77/aiometadata/commit/99a8dd101dbab483bc44acb1ef0faef26555ba45)), closes [#604](https://github.com/cedya77/aiometadata/issues/604)
+* report the database dialect before initialize() has run ([87296b7](https://github.com/cedya77/aiometadata/commit/87296b73a5fafbff12cbc64fa0efe7e1abab0ea0))
+* request Trakt watched shows with extended=progress so hide-watched works again ([963dd96](https://github.com/cedya77/aiometadata/commit/963dd9647d590d915f1d7546f7abd301ec7909dc))
+* resolve frontend typecheck errors ([6d6643e](https://github.com/cedya77/aiometadata/commit/6d6643e927bea82f3f51b9f667690e1604e5635a))
+* scope MovieLens catalog cache to the connected account ([c69d4e1](https://github.com/cedya77/aiometadata/commit/c69d4e12430670f7c57b47903caf9059bd188c49))
+* **search:** let OpenRouter AI search run without credits ([b294d84](https://github.com/cedya77/aiometadata/commit/b294d84aea9e6d4d85e123bb65689c5857793046))
+* **search:** request posters at w600_and_h900_bestv2 like every other path ([bc24573](https://github.com/cedya77/aiometadata/commit/bc24573fb7db9760f61bb2102a8a3a2ad44f5304))
+* sign the warmer's proxy-art URLs so private art hosts resolve ([60122ec](https://github.com/cedya77/aiometadata/commit/60122ecc2dc0ea9bc29f4f6c318823c1d700b0ba))
+* skip rendered art the warmer has already cached ([e42ecf5](https://github.com/cedya77/aiometadata/commit/e42ecf5168e9622ce55ede509470137746a0b6f1))
+* stale catalog name in movielens edit modal ([a719e59](https://github.com/cedya77/aiometadata/commit/a719e5980c7015b2589ece2d42cbb9fdea6d46bd))
+* stale catalog name in movielens edit modal ([5018028](https://github.com/cedya77/aiometadata/commit/501802834c09c511140da4d450026fdcfd18aa93))
+* stop forcing a vote count floor on discover catalogs ([61334bc](https://github.com/cedya77/aiometadata/commit/61334bcee9eb54eaf63c7b75ffd3109b523bebb6))
+* stop inferring a rating poster provider from saved API keys ([a7a2359](https://github.com/cedya77/aiometadata/commit/a7a2359069361d7b732746cac26f6de44c83c33d))
+* stop logging missing poster art as an error ([694a1c1](https://github.com/cedya77/aiometadata/commit/694a1c1db9221312979ba8ecee84c2789e8073b9))
+* stop signing image proxy URLs with the MovieLens credential key ([607f820](https://github.com/cedya77/aiometadata/commit/607f820d8b5fb4d75274d76ac0f5b23b5e7ab1bc))
+* surface MovieLens list fetch failures instead of truncating ([f752d60](https://github.com/cedya77/aiometadata/commit/f752d604dfd47ccdece6008718f1ef4e2b36d1d9))
+* **tmdb:** never request a rendition larger than the asset ([032cb08](https://github.com/cedya77/aiometadata/commit/032cb08e6491f7f2462c530b061596759b2b0762))
+* **trakt:** serve the integration logo from our own assets ([b507ac1](https://github.com/cedya77/aiometadata/commit/b507ac1b124d38bc046d5c075a7f1554c16ab6d5))
+* warm on cache epoch change rather than addon version ([5785c15](https://github.com/cedya77/aiometadata/commit/5785c15d402af2ebbbc8594c854be5ec473fc3f4))
+* warm the default poster when a rating poster cannot be built ([4b2c096](https://github.com/cedya77/aiometadata/commit/4b2c0964f2953e10dc184e9c2df890833efe17b5))
+
+
+### Performance Improvements
+
+* cache & memoize image cache dns lookups ([d373cfc](https://github.com/cedya77/aiometadata/commit/d373cfc6394067475543d479f61510c06b80e078))
+* dedup md5 hashes ([bfe73fb](https://github.com/cedya77/aiometadata/commit/bfe73fb6e0e89ef2f097f5bdeeef02c98f9ba556))
+* use lz4 instead of lz-string in config cache ([44d92cd](https://github.com/cedya77/aiometadata/commit/44d92cd63bba581e8691a3cc2868720045be8555))
+* version keys by epoch instead of addonversion ([e5ad95c](https://github.com/cedya77/aiometadata/commit/e5ad95c05c7eccf5b7e0d5f33c3c7bf0013101ca))
+* warm images through one bounded adaptive queue ([59f84c8](https://github.com/cedya77/aiometadata/commit/59f84c8fc4b21db300574d41c15a1cf6a83d09b7))
+
+## [2.8.0](https://github.com/cedya77/aiometadata/compare/v2.7.1...v2.8.0) (2026-07-06)
+
+
+### Features
+
+* add configurable minimum votes for tmdb.year catalog ([07db94a](https://github.com/cedya77/aiometadata/commit/07db94a55bc9ca48efbd81ac6d102045896ff7c7))
+* add MDBList recommendation catalogs ([d71a5d5](https://github.com/cedya77/aiometadata/commit/d71a5d5ef4f20ec1e1387958dca510cbc800b195))
+* add MyAnimeList integration with watch tracking and list catalogs ([91e97e5](https://github.com/cedya77/aiometadata/commit/91e97e58c044a59c642c621a5d2cd38355ba230e))
+* add opt-in built-in poster cache with dashboard log integration ([153cd15](https://github.com/cedya77/aiometadata/commit/153cd152e103e4f80f158a3eeaa53645096cfb62))
+* add with_networks filter to tmdb discover series builder ([2e80228](https://github.com/cedya77/aiometadata/commit/2e80228fc50776d80cdd174e6eb92af17797606e))
+* compact Error Management UI in ops tab ([d93ab67](https://github.com/cedya77/aiometadata/commit/d93ab67b8afa9b1c6b83df69c12fd294d97b989a))
+* enforce env-registry coverage and backfill dashboard settings ([3935e2e](https://github.com/cedya77/aiometadata/commit/3935e2e51f3854ac3abb0776afb6db9643725113))
+* import private lists from connected Trakt account by entering own username ([61b2b08](https://github.com/cedya77/aiometadata/commit/61b2b08e584e8f55ee8897117c0e0d4ffe885542))
+* only advertise subtitles resource when watch tracking is enabled ([23a10cb](https://github.com/cedya77/aiometadata/commit/23a10cb0d106f42c18cae2273d70a99f1fa60288))
+* support read replica and DDL gating for geo-redundancy ([cebae83](https://github.com/cedya77/aiometadata/commit/cebae83a44f8be2b575a19dd5aad44dde5f06009))
+
+
+### Bug Fixes
+
+* add available flag to TMDB series episode videos ([4f9590e](https://github.com/cedya77/aiometadata/commit/4f9590ed2711e1ac94dda0b7e20d0618e474b5a5))
+* apply tmdb discover series runtime filter locally with episode fallbacks ([f9b173c](https://github.com/cedya77/aiometadata/commit/f9b173cf57b9a2d9b8bf1582249c56fb0ed7a3f1))
+* authenticate public Trakt list requests to bypass stale CDN cache ([0eca2b5](https://github.com/cedya77/aiometadata/commit/0eca2b5370b07d3f4fc004453d0302c15f8bd31d))
+* include custom display types in Select by Type filter ([b64f3ab](https://github.com/cedya77/aiometadata/commit/b64f3ab04631108e45eafc8cc12ef7b2395376a7))
+* insert duplicated discover catalog below the original ([e1569a5](https://github.com/cedya77/aiometadata/commit/e1569a532c056732ea162bb5ee068acc2ba43bb7))
+* preserve tags and merge membership when editing discover catalog filters ([e1569a5](https://github.com/cedya77/aiometadata/commit/e1569a532c056732ea162bb5ee068acc2ba43bb7))
+* prevent cross-provider poisoning of anime meta components ([24f42a3](https://github.com/cedya77/aiometadata/commit/24f42a3a463e3a22b8b8b0d24d975f4214d6e9e5))
+* re-read warmup config from env so dashboard-applied settings take effect ([2c3ce26](https://github.com/cedya77/aiometadata/commit/2c3ce26bfa64a6d2da058595d50e11da511ba909))
+* revert AniList auth to authorization code grant ([122a76a](https://github.com/cedya77/aiometadata/commit/122a76aee768295e4c4c7e43e6e37638c0c078c7))
+* use AniList implicit grant to bypass Cloudflare-blocked token endpoint ([fb4db5a](https://github.com/cedya77/aiometadata/commit/fb4db5a0aa631ab081bc0859ee74ab286d1cfe0b))
+
+## [2.7.1](https://github.com/cedya77/aiometadata/compare/v2.7.0...v2.7.1) (2026-06-17)
+
+
+### Bug Fixes
+
+* revert full-DB dashboard stats aggregation back to bounded 250-sample ([652aff0](https://github.com/cedya77/aiometadata/commit/652aff023a3a32ae9448e53f916793e6c1066423))
+
+## [2.7.0](https://github.com/cedya77/aiometadata/compare/v2.6.7...v2.7.0) (2026-06-17)
+
+
+### Features
+
+* add weekly seasonal MAL catalogs ([04ae910](https://github.com/cedya77/aiometadata/commit/04ae91093ac0e4636d98d78856b6493acfbd0594))
+* aggregate dashboard system stats over full DB (streaming fold + gated Postgres SQL) ([0a861f5](https://github.com/cedya77/aiometadata/commit/0a861f5853c2e6841e348602b7f42efb990a1118))
+* bounded log buffer with redaction + self-backfilling SSE log stream ([9a4793a](https://github.com/cedya77/aiometadata/commit/9a4793a1a3a839b5c0cea946852a4b4c4b7ce5ac))
+* make MAL/Jikan page size configurable via MAL_PAGE_SIZE ([04ae910](https://github.com/cedya77/aiometadata/commit/04ae91093ac0e4636d98d78856b6493acfbd0594))
+
+
+### Bug Fixes
+
+* allow breaking out of live log auto-scroll via wheel, touch, and keyboard ([71d1b05](https://github.com/cedya77/aiometadata/commit/71d1b05a0a3fe1804ed77f07404a2f0580e8e3d1))
+* carry status into anime catalog meta and treat unreleased/tba as unreleased ([4960695](https://github.com/cedya77/aiometadata/commit/4960695b587bc2bdfbea20eaacb2d5c0369ac211))
+* clear reinstall banner after non-manifest saves and reinstall ([0333a71](https://github.com/cedya77/aiometadata/commit/0333a71dcdb48a97e7a5bc45bf1d75059cb3efe2))
+* don't cache degraded provider fallbacks on transient upstream errors ([f9af96c](https://github.com/cedya77/aiometadata/commit/f9af96c863b7151e8554f1972175510431278adf))
+* fribb parsing ([fcfeeb4](https://github.com/cedya77/aiometadata/commit/fcfeeb4cc6b4da6811af330d93516ba8c7c6faf7))
+* handle Fribb themoviedb_id.movie arrays and index all imdb/tmdb ids ([76e0a25](https://github.com/cedya77/aiometadata/commit/76e0a258b537878e27c6c46011526572ebdb4c5a))
+* hide unreleased series with not-yet-aired status and null release date ([637680e](https://github.com/cedya77/aiometadata/commit/637680ee189c6394724669fb6c9d4707bac70fba))
+
+## [2.6.7](https://github.com/cedya77/aiometadata/compare/v2.6.6...v2.6.7) (2026-06-08)
+
+
+### Bug Fixes
+
+* include TV-Y and TV-Y7 in age-rating catalog filter ([cd71ffd](https://github.com/cedya77/aiometadata/commit/cd71ffd1f6c0dc4fb9fde1c7862d9a094e9e6d30))
+
+## [2.6.6](https://github.com/cedya77/aiometadata/compare/v2.6.5...v2.6.6) (2026-06-07)
+
+
+### Bug Fixes
+
+* **mal:** restore sfw param to mal seasons catalog fetching following resolution of 504 error from jikan and add missing genres property for MAL catalog meta. ([4661e98](https://github.com/cedya77/aiometadata/commit/4661e987e866c3e81997fe67bdd6658581d0a82f))
+
+## [2.6.5](https://github.com/cedya77/aiometadata/compare/v2.6.4...v2.6.5) (2026-06-04)
+
+
+### Bug Fixes
+
+* verify nameToImdb title match before stamping imdb id ([c2aaeae](https://github.com/cedya77/aiometadata/commit/c2aaeae543032b57acdde6498a052bd4ed06eb96))
+
+## [2.6.4](https://github.com/cedya77/aiometadata/compare/v2.6.3...v2.6.4) (2026-06-04)
+
+
+### Bug Fixes
+
+* apply age-rating filter using canonical catalog type, not localized ([960dc78](https://github.com/cedya77/aiometadata/commit/960dc78223d8f87e2213477de0be630f8113f0c7))
+* scope simkl watchlist activity watermark per status ([af009d7](https://github.com/cedya77/aiometadata/commit/af009d77031e3932958b3d2c6bc07e3646bab3a8))
+* stamp cross-ids on the tvdb anime catalog meta route ([cbb70fa](https://github.com/cedya77/aiometadata/commit/cbb70faecf12e79b00ffb62bcbed696cdca4fc97))
+
+## [2.6.3](https://github.com/cedya77/aiometadata/compare/v2.6.2...v2.6.3) (2026-06-02)
+
+
+### Bug Fixes
+
+* don't cache N/A imdb rating while the ratings dataset is unavailable ([b39f649](https://github.com/cedya77/aiometadata/commit/b39f6496ce9163e1adff60d3800331111057361e))
+* recover correct TVDB id via IMDb lookup when a mapped id returns no data ([3e9dce1](https://github.com/cedya77/aiometadata/commit/3e9dce19e05e895bb505164e2b18c0444684b8e2))
+
+## [2.6.2](https://github.com/cedya77/aiometadata/compare/v2.6.1...v2.6.2) (2026-06-02)
+
+
+### Bug Fixes
+
+* stamp tmdb/tvdb/imdb/kitsu/mal ids on anime catalog metas so custom art patterns resolve ([977fc72](https://github.com/cedya77/aiometadata/commit/977fc72e27469752dfce0d7eb4c0ae9f8ca2587b))
+
+## [2.6.1](https://github.com/cedya77/aiometadata/compare/v2.6.0...v2.6.1) (2026-06-02)
+
+
+### Bug Fixes
+
+* improve dashboard logs, settings, content, and tab navigation on mobile ([ca01188](https://github.com/cedya77/aiometadata/commit/ca011882edc24b7c3d4e6f16aba140923f5c7d8a))
+* match catalog tags case-insensitively and warn on duplicates ([77d6766](https://github.com/cedya77/aiometadata/commit/77d67666102836a2175681f2e0bdb6374ebceede))
+* redesign mobile bulk action bar as a compact scrollable icon row ([6423c04](https://github.com/cedya77/aiometadata/commit/6423c0485220497ec6e112a5d82158faa57f33f9))
+* restore bulk delete for all non-merged catalogs ([f2f84f5](https://github.com/cedya77/aiometadata/commit/f2f84f5eb77a102ce5c9573d0b2a18f1c24d32c8))
+
+## [2.6.0](https://github.com/cedya77/aiometadata/compare/v2.5.3...v2.6.0) (2026-06-01)
+
+
+### Features
+
+* add bulk select-by-type for catalogs ([82e27f6](https://github.com/cedya77/aiometadata/commit/82e27f6cea7cc264c316080cca81aa35d431e2f8))
+* add restart-from-UI for settings that require a reboot ([17ca283](https://github.com/cedya77/aiometadata/commit/17ca283790dcedb525441748cf238d9015f8128e))
+* add simkl curated recipe catalogs ([0423159](https://github.com/cedya77/aiometadata/commit/042315980c5bc2d13528d20649c76c253615e85b))
+* catalog tags with per-tag manifest profiles ([e4d801a](https://github.com/cedya77/aiometadata/commit/e4d801a3e1bab121287ee9ea78d881c52b2a67c4))
+* revamp dashboard logs and overview tabs ([9099dc5](https://github.com/cedya77/aiometadata/commit/9099dc5adf373b790d078d7d506f459444229f18))
+
+
+### Bug Fixes
+
+* always populate certification for tvdb metas so age-rating filtering works when the rating display toggle is off ([9dd510c](https://github.com/cedya77/aiometadata/commit/9dd510c1475bc4eb216a619cd969fa240651092c))
+* cast config_data to jsonb in postgres user queries ([9075da3](https://github.com/cedya77/aiometadata/commit/9075da3bc7cfaa2ce8fe017386dcfe657445c440))
+* include disabled merge sources when building genres for merged catalogs ([dc42b17](https://github.com/cedya77/aiometadata/commit/dc42b17ec89948611e4f58b380ad0422064d8548))
+* invalidate simkl watchlist cache on activity change ([ec9956e](https://github.com/cedya77/aiometadata/commit/ec9956e7c38bc81b7056d57a38672dff4ef11faf))
+* route content filtering through single applyCatalogFilters chokepoint ([7bb8acf](https://github.com/cedya77/aiometadata/commit/7bb8acfaf72382c750ee04e3aa290a0d51f05d70))
+
+## [2.5.3](https://github.com/cedya77/aiometadata/compare/v2.5.2...v2.5.3) (2026-05-27)
+
+
+### Bug Fixes
+
+* manifest ordering id-only fallback for displayType overrides ([cf133b0](https://github.com/cedya77/aiometadata/commit/cf133b0a2ba60f47693c602d19710152378b814b))
+
+## [2.5.2](https://github.com/cedya77/aiometadata/compare/v2.5.1...v2.5.2) (2026-05-27)
+
+
+### Bug Fixes
+
+* handle displayType suffix in merged catalog manifest ordering ([b250a30](https://github.com/cedya77/aiometadata/commit/b250a3056693ea40f84bb251208becdeb46c2e75))
+* use unsaved AI keys for catalog generation ([460792a](https://github.com/cedya77/aiometadata/commit/460792abb2762db8fb5ea11131ac65c38de92e75))
+
+## [2.5.1](https://github.com/cedya77/aiometadata/compare/v2.5.0...v2.5.1) (2026-05-27)
+
+
+### Bug Fixes
+
+* respect merged catalog position in manifest ordering ([d067767](https://github.com/cedya77/aiometadata/commit/d067767c3fdf76657ca74c66aa5fcc54d74bba1d))
+
+## [2.5.0](https://github.com/cedya77/aiometadata/compare/v2.4.3...v2.5.0) (2026-05-27)
+
+
+### Features
+
+* add merged catalogs ([832dc85](https://github.com/cedya77/aiometadata/commit/832dc85e5d0a756d70af47f4563a4623369de2c2))
+
+
+### Bug Fixes
+
+* preserve TVDB search results for niche shows without posters ([577c5b6](https://github.com/cedya77/aiometadata/commit/577c5b6b458c4dcb6e08041a58d84befd891dd1a))
+
 ## [2.4.3](https://github.com/cedya77/aiometadata/compare/v2.4.2...v2.4.3) (2026-05-23)
 
 

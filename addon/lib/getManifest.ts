@@ -11,7 +11,9 @@ import CATALOG_TYPES from "../static/catalog-types.json";
 const jikan: any = require('./mal');
 const DEFAULT_LANGUAGE = "en-US";
 import { cacheWrapJikanApi, cacheWrapGlobal, cacheWrapStremThruGenres } from './getCache';
+import { mergeGenreOptions } from '../utils/mergedCatalog';
 import consola from 'consola';
+import { hasAnyWatchTrackingEnabled } from './watchTracking';
 const logger = consola.withTag('Manifest');
 
 
@@ -102,7 +104,7 @@ function createCatalog(id: string, type: string, catalogDef: any, options: strin
 
   let pageSize: number;
   if (id.startsWith('mal.')) {
-    pageSize = 25;
+    pageSize = parseInt(process.env.MAL_PAGE_SIZE as string) || 25;
   } else {
     pageSize = parseInt(process.env.CATALOG_LIST_ITEMS_SIZE as string) || 20;
   }
@@ -131,6 +133,12 @@ function createCatalog(id: string, type: string, catalogDef: any, options: strin
     showInHome: showInHome
   };
 }
+
+const MOVIELENS_GENRES = [
+  'Action', 'Adventure', 'Animation', 'Comedy', 'Crime', 'Documentary',
+  'Drama', 'Family', 'Fantasy', 'History', 'Horror', 'Music', 'Mystery',
+  'Romance', 'Science Fiction', 'TV Movie', 'Thriller', 'War', 'Western'
+];
 
 function getCatalogDefinition(catalogId: string): any {
   const [provider, catalogType] = catalogId.split('.');
@@ -192,7 +200,9 @@ async function createMDBListCatalog(userCatalog: any, mdblistKey: string, prefet
       logger.info(`MDBList using ${genres.length} static fallback genres for selection: ${genreSelection}`);
     }
 
-    const genreOptions = userCatalog.showInHome ? genres : ['None', ...genres];
+    const genreOptions = userCatalog.id.startsWith('mdblist.recommended.')
+      ? ['None']
+      : (userCatalog.showInHome ? genres : ['None', ...genres]);
 
     const catalogType = userCatalog.displayType || userCatalog.type;
 
@@ -542,6 +552,27 @@ function createAniListCatalog(userCatalog: any, showPrefix: boolean = false, pre
   }
 }
 
+function createMalUserListCatalog(userCatalog: any, showPrefix: boolean = false, prefixName: string = "AIOMetadata"): any {
+  try {
+    const catalogType = userCatalog.displayType || userCatalog.type || 'series';
+
+    return {
+      id: userCatalog.id,
+      type: catalogType,
+      name: `${showPrefix ? `${prefixName} - ` : ""}${userCatalog.name}`,
+      pageSize: parseInt(process.env.CATALOG_LIST_ITEMS_SIZE as string) || 20,
+      extra: [
+        { name: "genre", options: ['None'], isRequired: userCatalog.showInHome ? false : true },
+        { name: "skip" },
+      ],
+      showInHome: userCatalog.showInHome
+    };
+  } catch (error: any) {
+    logger.error(`Error creating MAL user list catalog ${userCatalog.id}:`, error.message);
+    return null;
+  }
+}
+
 async function createMalCatalog(userCatalog: any, genres: string[], showPrefix: boolean = false, prefixName: string = "AIOMetadata"): Promise<any> {
   try {
     logger.debug(`Creating MAL discover catalog: ${userCatalog.id} (${userCatalog.type})`);
@@ -600,6 +631,62 @@ function createPublicMetaDBCatalog(userCatalog: any, showPrefix: boolean = false
   }
 }
 
+function createMergedCatalog(
+  userCatalog: any,
+  allBuiltCatalogs: any[],
+  showPrefix: boolean = false,
+  prefixName: string = "AIOMetadata"
+): any {
+  try {
+    logger.debug(`Creating Merged catalog: ${userCatalog.id} (${userCatalog.type})`);
+    const catalogType = userCatalog.displayType || userCatalog.type;
+    const sources = userCatalog.metadata?.mergedSources || [];
+
+    // Genre union across the already-built source manifest entries, deduped by
+    // a normalized key so that slug-style labels (e.g. Simkl "science-fiction")
+    // collapse onto display-style labels (e.g. Letterboxd "Science Fiction").
+    const perSourceOptions: string[][] = [];
+    for (const src of sources) {
+      const suffixed = `${src.catalogId}_${src.catalogType}`;
+      const built = allBuiltCatalogs.find((c: any) => {
+        if (!c) return false;
+        if (c.id === src.catalogId && c.type === src.catalogType) return true;
+        if (c.id === suffixed) return true; // displayType-overridden manifest entry
+        return false;
+      })
+        // Fallback: id-only match
+        || allBuiltCatalogs.find((c: any) =>
+          c && (c.id === src.catalogId || c.id.startsWith(src.catalogId + '_'))
+        );
+      if (!built) continue;
+      const genreExtra = built.extra?.find((e: any) => e.name === 'genre');
+      const opts: string[] = genreExtra?.options || [];
+      if (opts.length > 0) perSourceOptions.push(opts);
+    }
+
+    const genreOptions = mergeGenreOptions(perSourceOptions);
+
+    const finalGenreOptions = genreOptions.length > 0
+      ? (userCatalog.showInHome ? genreOptions : ['None', ...genreOptions])
+      : ['None'];
+
+    return {
+      id: userCatalog.id,
+      type: catalogType,
+      name: `${showPrefix ? `${prefixName} - ` : ""}${userCatalog.name}`,
+      pageSize: parseInt(process.env.CATALOG_LIST_ITEMS_SIZE as string) || 20,
+      extra: [
+        { name: "genre", options: finalGenreOptions, isRequired: !userCatalog.showInHome },
+        { name: "skip" },
+      ],
+      showInHome: userCatalog.showInHome,
+    };
+  } catch (error: any) {
+    logger.error(`Error creating Merged catalog ${userCatalog.id}:`, error.message);
+    return null;
+  }
+}
+
 async function createSimklCatalog(userCatalog: any, showPrefix: boolean = false, prefixName: string = "AIOMetadata"): Promise<any> {
   try {
     logger.debug(`Creating Simkl catalog: ${userCatalog.id} (${userCatalog.type})`);
@@ -647,9 +734,9 @@ async function createSimklCatalog(userCatalog: any, showPrefix: boolean = false,
       showInHome: userCatalog.showInHome
     };
 
-    if (userCatalog.id.startsWith('simkl.trending.')) {
+    if (userCatalog.id.startsWith('simkl.trending.') || userCatalog.id.startsWith('simkl.recipe.')) {
       const intervalOptions = userCatalog.showInHome ? ['today', 'week', 'month'] : ['None', 'today', 'week', 'month'];
-      const defaultInterval = userCatalog.metadata?.interval || 'today';
+      const defaultInterval = userCatalog.metadata?.interval || (userCatalog.id.startsWith('simkl.recipe.') ? 'week' : 'today');
 
       catalog.extra.unshift({
         name: "genre",
@@ -674,7 +761,7 @@ async function createSimklCatalog(userCatalog: any, showPrefix: boolean = false,
   }
 }
 
-async function getManifest(config: any): Promise<any> {
+async function getManifest(config: any, opts: { tag?: string } = {}): Promise<any> {
   const startTime = Date.now();
   logger.start('Starting manifest generation...');
 
@@ -686,8 +773,33 @@ async function getManifest(config: any): Promise<any> {
     const userCatalogs = config.catalogs || getDefaultCatalogs();
     const translatedCatalogs = loadTranslations(language);
 
+  const tag = (opts.tag || '').trim();
+  const tagLower = tag.toLowerCase();
+  const enabledCatalogs = userCatalogs.filter((c: any) =>
+    c.enabled && (!tag || (Array.isArray(c.tags) && c.tags.some((t: any) => String(t).toLowerCase() === tagLower)))
+  );
 
-  const enabledCatalogs = userCatalogs.filter((c: any) => c.enabled);
+  // Resolve the tag to its stored casing (install URLs may be hand-typed in any case).
+  const displayTag = tag
+    ? (enabledCatalogs
+        .flatMap((c: any) => (Array.isArray(c.tags) ? c.tags : []))
+        .find((t: any) => String(t).toLowerCase() === tagLower) || tag)
+    : tag;
+
+  // Absorbed merge sources must be built (even if disabled) so their genres feed the parent.
+  const mergedSourceKeys = new Set<string>();
+  for (const c of enabledCatalogs) {
+    if (!c.id.startsWith('merged.')) continue;
+    for (const s of (c.metadata?.mergedSources || [])) {
+      mergedSourceKeys.add(`${s.catalogId}:${s.catalogType}`);
+    }
+  }
+  const enabledKeys = new Set(enabledCatalogs.map((c: any) => `${c.id}:${c.type}`));
+  const absorbedSourceCatalogs = userCatalogs.filter((c: any) =>
+    mergedSourceKeys.has(`${c.id}:${c.type}`) && !enabledKeys.has(`${c.id}:${c.type}`)
+  );
+  const absorbedKeys = new Set<string>(absorbedSourceCatalogs.map((c: any) => `${c.id}:${c.type}`));
+
   logger.info(`Total catalogs: ${userCatalogs.length}, Enabled: ${enabledCatalogs.length}`);
   logger.debug(`MDBList catalogs in enabled:`, enabledCatalogs.filter((c: any) => c.id.startsWith('mdblist.')).map((c: any) => c.id));
   logger.debug(`Custom catalogs in enabled:`, enabledCatalogs.filter((c: any) => c.id.startsWith('custom.')).map((c: any) => c.id));
@@ -742,7 +854,7 @@ async function getManifest(config: any): Promise<any> {
     const animeGenres = await cacheWrapJikanApi('anime-genres', async () => {
       logger.info('[Cache Miss] Fetching fresh anime genre list in manifest from Jikan...');
       return await jikan.getAnimeGenres();
-    }, null, { skipVersion: true });
+    }, null);
     animeGenreNames = animeGenres.filter(Boolean).map((genre: any) => genre.name).sort();
     logger.debug(`Anime genres fetched in ${Date.now() - animeStart}ms`);
 
@@ -752,7 +864,7 @@ async function getManifest(config: any): Promise<any> {
         const studioPromise = cacheWrapJikanApi('mal-studios', async () => {
           logger.debug('[Cache Miss] Fetching fresh anime studio list in manifest from Jikan...');
           return await jikan.getStudios();
-        }, 30 * 24 * 60 * 60, { skipVersion: true });
+        }, 30 * 24 * 60 * 60);
 
         const timeoutPromise = new Promise((_: any, reject: any) => {
           setTimeout(() => reject(new Error('Studio fetch timeout')), 2000);
@@ -777,7 +889,7 @@ async function getManifest(config: any): Promise<any> {
         const seasonsData = await cacheWrapJikanApi('mal-available-seasons', async () => {
           logger.debug('[Cache Miss] Fetching available seasons from Jikan...');
           return await jikan.getAvailableSeasons();
-        }, 7 * 24 * 60 * 60, { skipVersion: true });
+        }, 7 * 24 * 60 * 60);
 
         const seasonNames = ['Winter', 'Spring', 'Summer', 'Fall'];
         const seasonOrder: Record<string, number> = { winter: 0, spring: 1, summer: 2, fall: 3 };
@@ -857,8 +969,10 @@ async function getManifest(config: any): Promise<any> {
     }
   }
 
-  let catalogs: any[] = await Promise.all(enabledCatalogs
-    .filter((userCatalog: any) => {
+  const pass1UserCatalogs = [...enabledCatalogs, ...absorbedSourceCatalogs].filter((userCatalog: any) => {
+      if (userCatalog.id.startsWith('merged.')) {
+        return false; // handled in pass 2 (needs source manifest entries to be built first)
+      }
       const catalogDef = getCatalogDefinition(userCatalog.id);
       if (isMDBList(userCatalog.id)) {
         return true;
@@ -868,6 +982,9 @@ async function getManifest(config: any): Promise<any> {
       }
       if (isSimkl(userCatalog.id)) {
         return true;
+      }
+      if (userCatalog.id.startsWith('movielens.')) {
+        return !!config.apiKeys?.movieLensCredId;
       }
       if (userCatalog.id.startsWith('tmdb.list.')) {
         return true;
@@ -879,6 +996,9 @@ async function getManifest(config: any): Promise<any> {
         return true;
       }
       if (userCatalog.id.startsWith('mal.discover.')) {
+        return true;
+      }
+      if (userCatalog.id.startsWith('mal.userlist.') || userCatalog.id === 'mal.suggestions') {
         return true;
       }
       if (userCatalog.id.startsWith('stremthru.')) {
@@ -904,7 +1024,9 @@ async function getManifest(config: any): Promise<any> {
         return false;
       }
       return true;
-    })
+    });
+
+  let catalogs: any[] = await Promise.all(pass1UserCatalogs
     .map(async (userCatalog: any) => {
       if (isMDBList(userCatalog.id)) {
           logger.debug(`Processing MDBList catalog: ${userCatalog.id}`);
@@ -923,6 +1045,26 @@ async function getManifest(config: any): Promise<any> {
           const result = await createSimklCatalog(userCatalog, showPrefix, prefixName);
           logger.debug(`Simkl catalog result:`, result ? 'success' : 'failed');
           return result;
+      }
+      if (userCatalog.id.startsWith('movielens.')) {
+          logger.debug(`Processing MovieLens catalog: ${userCatalog.id}`);
+          const catalogType = userCatalog.displayType || userCatalog.type;
+          const supportsGenres = userCatalog.id.startsWith('movielens.explore') || userCatalog.id.startsWith('movielens.watchlist');
+          const genreOptions = supportsGenres ? MOVIELENS_GENRES : [];
+          const options = userCatalog.showInHome ? genreOptions : ['None', ...genreOptions];
+          const extra: any[] = [];
+          if (options.length > 0) {
+            extra.push({ name: 'genre', options, isRequired: !userCatalog.showInHome });
+          }
+          extra.push({ name: 'skip' });
+          return {
+            id: userCatalog.id,
+            type: catalogType,
+            name: `${showPrefix ? `${prefixName} - ` : ""}${userCatalog.name}`,
+            pageSize: parseInt(process.env.CATALOG_LIST_ITEMS_SIZE as string) || 20,
+            extra,
+            showInHome: userCatalog.showInHome
+          };
       }
       if (isPublicMetaDB(userCatalog.id)) {
           logger.debug(`Processing PublicMetaDB catalog: ${userCatalog.id}`);
@@ -968,6 +1110,10 @@ async function getManifest(config: any): Promise<any> {
         const result = await createMalCatalog(userCatalog, animeGenreNames, showPrefix, prefixName);
         logger.debug(`Mal discover catalog result:`, result ? 'success' : 'failed');
         return result;
+      }
+      if (userCatalog.id.startsWith('mal.userlist.') || userCatalog.id === 'mal.suggestions') {
+        logger.debug(`Processing MAL user list catalog: ${userCatalog.id}`);
+        return createMalUserListCatalog(userCatalog, showPrefix, prefixName);
       }
       if (userCatalog.id.startsWith('letterboxd.')) {
           logger.debug(`Processing Letterboxd catalog: ${userCatalog.id}`);
@@ -1056,10 +1202,11 @@ async function getManifest(config: any): Promise<any> {
       else if (userCatalog.id === 'mal.airing' || userCatalog.id === 'mal.upcoming' ||
                userCatalog.id === 'mal.top_movies' || userCatalog.id === 'mal.top_series' ||
                userCatalog.id === 'mal.most_favorites' || userCatalog.id === 'mal.most_popular' ||
-               userCatalog.id === 'mal.top_anime') {
+               userCatalog.id === 'mal.top_anime' ||
+               userCatalog.id === 'mal.season_top' || userCatalog.id === 'mal.season_top_new') {
         catalogOptions = ['None'];
       }
-      else if (userCatalog.id.startsWith('mal.') && !['mal.airing', 'mal.upcoming', 'mal.schedule', 'mal.seasons', 'mal.top_movies', 'mal.top_series', 'mal.most_favorites', 'mal.top_anime', 'mal.most_popular'].includes(userCatalog.id)) {
+      else if (userCatalog.id.startsWith('mal.') && !['mal.airing', 'mal.upcoming', 'mal.schedule', 'mal.seasons', 'mal.top_movies', 'mal.top_series', 'mal.most_favorites', 'mal.top_anime', 'mal.most_popular', 'mal.season_top', 'mal.season_top_new'].includes(userCatalog.id)) {
         catalogOptions = userCatalog.showInHome ? animeGenreNames : ['None', ...animeGenreNames];
       }
       else {
@@ -1093,6 +1240,68 @@ async function getManifest(config: any): Promise<any> {
     seen.add(key);
     return true;
   });
+
+  // Pass 2: Build merged catalogs after all source catalogs have been built so
+  // we can resolve genre options from their manifest entries.
+  const mergedUserCatalogs = enabledCatalogs
+    .map((c: any, i: number) => ({ userCatalog: c, configIndex: i }))
+    .filter((entry: any) => entry.userCatalog.id.startsWith('merged.'));
+  if (mergedUserCatalogs.length > 0) {
+    const findManifestIndex = (catId: string, catType: string) => {
+      const idx = catalogs.findIndex(c => c.id === catId && c.type === catType);
+      if (idx !== -1) return idx;
+      const suffixed = catalogs.findIndex(c => c.id === `${catId}_${catType}`);
+      if (suffixed !== -1) return suffixed;
+      return catalogs.findIndex(c => c.id === catId);
+    };
+    for (const { userCatalog, configIndex } of mergedUserCatalogs) {
+      const built = createMergedCatalog(userCatalog, catalogs, showPrefix, prefixName);
+      if (!built) continue;
+      const preceding = enabledCatalogs.slice(0, configIndex);
+      let insertIdx = 0;
+      for (let i = preceding.length - 1; i >= 0; i--) {
+        const found = findManifestIndex(preceding[i].id, preceding[i].type);
+        if (found !== -1) {
+          insertIdx = found + 1;
+          break;
+        }
+      }
+      catalogs.splice(insertIdx, 0, built);
+    }
+    logger.debug(`Inserted ${mergedUserCatalogs.length} merged catalogs into manifest`);
+  }
+
+  // Drop absorbed sources now that parents have harvested their genres.
+  if (absorbedKeys.size > 0) {
+    catalogs = catalogs.filter((c: any) => {
+      for (const key of absorbedKeys) {
+        const sep = key.lastIndexOf(':');
+        const sid = key.slice(0, sep);
+        const stype = key.slice(sep + 1);
+        if ((c.id === sid && c.type === stype) || c.id === `${sid}_${stype}`) return false;
+      }
+      return true;
+    });
+  }
+
+
+  // Several branches prepend "None" to the genre list for catalogs that are not
+  // on home, and some providers ship a genre of their own literally called
+  // "None" (Trakt shows, for one), so the option can end up listed twice.
+  // Deduplicate once here rather than in every branch that builds options.
+  for (const catalog of catalogs as any[]) {
+    if (!Array.isArray(catalog?.extra)) continue;
+    for (const extra of catalog.extra) {
+      if (extra?.name !== 'genre' || !Array.isArray(extra.options)) continue;
+      const seen = new Set<string>();
+      extra.options = extra.options.filter((option: any) => {
+        const key = String(option);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
+  }
 
   const isSearchEnabled = config.search?.enabled ?? true;
   const engineEnabled = config.search?.engineEnabled || {};
@@ -1273,24 +1482,26 @@ async function getManifest(config: any): Promise<any> {
     }
   }
 
-  catalogs.push({
-    type: "series",
-    id: "calendar-videos",
-    extra: [
-      {
-        name: "calendarVideosIds",
-        isRequired: true,
-        optionsLimit: 100
-      }
-    ],
-    extraSupported: [
-      "calendarVideosIds"
-    ],
-    extraRequired: [
-      "calendarVideosIds"
-    ],
-    name: "Calendar videos"
-  });
+  if (!config.hideStremioCatalogs) {
+    catalogs.push({
+      type: "series",
+      id: "calendar-videos",
+      extra: [
+        {
+          name: "calendarVideosIds",
+          isRequired: true,
+          optionsLimit: 100
+        }
+      ],
+      extraSupported: [
+        "calendarVideosIds"
+      ],
+      extraRequired: [
+        "calendarVideosIds"
+      ],
+      name: "Calendar videos"
+    });
+  }
 
   const activeConfigs = [
     `Language: ${language}`,
@@ -1311,7 +1522,10 @@ async function getManifest(config: any): Promise<any> {
   if (!config.catalogModeOnly) {
     resources.push("meta");
   }
-  resources.push("subtitles");
+  const watchTrackingEnabled = hasAnyWatchTrackingEnabled(config);
+  if (watchTrackingEnabled) {
+    resources.push("subtitles");
+  }
   if(config.showRateMeButton) {
     resources.push("stream");
   }
@@ -1321,7 +1535,7 @@ async function getManifest(config: any): Promise<any> {
     version: buildInfo.version,
     logo: manifestLogoUrl(),
     background: `${host}/background.png`,
-    name: addonName,
+    name: tag ? `${addonName} · ${displayTag}` : addonName,
     description: "A metadata addon for power users. AIOMetadata uses TMDB, TVDB, TVMaze, MyAnimeList, IMDB and Fanart.tv to provide accurate data for movies, series, and anime. You choose the source.",
     resources,
     types: ["movie", "series", "anime.movie", "anime.series", "anime", "Trakt", "collection"],

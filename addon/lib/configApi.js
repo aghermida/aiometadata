@@ -2,14 +2,17 @@ const crypto = require('crypto');
 const { request, Agent, ProxyAgent } = require("undici");
 const database = require('./database');
 const buildInfo = require('./buildInfo');
+const { buildInstallUrl } = require('./installUrl');
+const { hasPermission } = require('./authSession');
+const { respondIfSigninRequired } = require('./signinGate');
 const KEY_VALIDATION_STATUS_SET = new Set(['valid', 'invalid', 'timeout', 'error']);
 const isKnownKeyValidationStatus = (status) =>
   typeof status === 'string' && KEY_VALIDATION_STATUS_SET.has(status);
 const TESTABLE_API_KEY_FIELDS = new Set(['gemini', 'tmdb', 'tvdb', 'fanart', 'rpdb', 'topPoster', 'mdblist', 'openrouter', 'publicmetadb']);
-const TEST_API_KEY_MAX_LENGTH = (() => {
+function getTestApiKeyMaxLength() {
   const parsed = parseInt(process.env.TEST_API_KEY_MAX_LENGTH || '128', 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 128;
-})();
+}
 
 // Gemini dispatcher configuration for API key testing
 // Priority: GEMINI_HTTPS_PROXY/GEMINI_HTTP_PROXY > HTTPS_PROXY/HTTP_PROXY > direct connection
@@ -46,14 +49,29 @@ const consola = require('consola');
 const logger = consola.withTag('ConfigApi');
 // Import the config cache
 const configCache = require('./configCache');
+const { getAliasForUuid, isAliasFeatureEnabled } = require('./aliasResolver');
+
+// The alias is purely cosmetic here — the middleware resolves either spelling —
+// but showing it is the point of the feature.
+function manifestIdentifier(userUUID) {
+  if (!isAliasFeatureEnabled()) return userUUID;
+  return getAliasForUuid(userUUID) || userUUID;
+}
+const {
+  sanitizeAiTriggerKeyword,
+  MIN_AI_TRIGGER_KEYWORD_LENGTH,
+  MAX_AI_TRIGGER_KEYWORD_LENGTH,
+} = require('../utils/aiSearchTrigger');
 const { deleteKeysByPattern } = require('./redisUtils');
 
-const MAX_CATALOGS = (() => {
+const MAX_TAG_NAME_LENGTH = 32;
+
+function getMaxCatalogs() {
   const raw = process.env.MAX_CATALOGS;
   if (!raw) return null;
   const max = Number.parseInt(raw, 10);
   return (Number.isFinite(max) && max > 0) ? max : null;
-})();
+}
 
 class ConfigApi {
   constructor() {
@@ -112,22 +130,22 @@ class ConfigApi {
         if (typeof provider === 'string') {
           return provider === 'fanart';
         }
-        
+
         // Handle new nested object format
         if (typeof provider === 'object' && provider !== null) {
-          return provider.poster === 'fanart' || 
-                 provider.background === 'fanart' || 
+          return provider.poster === 'fanart' ||
+                 provider.background === 'fanart' ||
                  provider.logo === 'fanart';
         }
-        
+
         return false;
       });
     })();
-    
+
     if (isFanartSelected && !requiredKeys.includes('fanart')) {
       requiredKeys.push('fanart');
     }
-    
+
     const missingKeys = requiredKeys.filter(key => {
       if (key === 'tmdb') {
         // TMDB is required unless there's a built-in key
@@ -150,20 +168,85 @@ class ConfigApi {
   }
 
   validateCatalogCount(config) {
-    if (!MAX_CATALOGS) return { valid: true };
+    const maxCatalogs = getMaxCatalogs();
+    if (!maxCatalogs) return { valid: true };
     const catalogs = config && config.catalogs;
     if (!Array.isArray(catalogs)) return { valid: true };
-    
+
     // Only count enabled catalogs
     const enabledCount = catalogs.filter(c => c.enabled !== false).length;
-    
-    if (enabledCount <= MAX_CATALOGS) return { valid: true };
+
+    if (enabledCount <= maxCatalogs) return { valid: true };
     return {
       valid: false,
       count: enabledCount,
-      max: MAX_CATALOGS,
-      message: `Too many enabled catalogs (${enabledCount}); the maximum allowed on this instance is ${MAX_CATALOGS}. Disable some catalogs and try again.`,
+      max: maxCatalogs,
+      message: `Too many enabled catalogs (${enabledCount}); the maximum allowed on this instance is ${maxCatalogs}. Disable some catalogs and try again.`,
     };
+  }
+
+  validateTagNames(config) {
+    const invalidNames = [];
+    const addInvalid = (name) => {
+      if (typeof name !== 'string') {
+        invalidNames.push(String(name));
+        return;
+      }
+      if (name.trim().length === 0 || name.length > MAX_TAG_NAME_LENGTH) {
+        invalidNames.push(name);
+      }
+    };
+
+    if (Array.isArray(config?.tags)) {
+      for (const tag of config.tags) {
+        addInvalid(tag?.name);
+      }
+    }
+
+    if (Array.isArray(config?.catalogs)) {
+      for (const catalog of config.catalogs) {
+        if (!Array.isArray(catalog?.tags)) continue;
+        for (const tagName of catalog.tags) {
+          addInvalid(tagName);
+        }
+      }
+    }
+
+    if (invalidNames.length === 0) return { valid: true };
+    return {
+      valid: false,
+      max: MAX_TAG_NAME_LENGTH,
+      message: `Tag names must be 1-${MAX_TAG_NAME_LENGTH} characters.`,
+    };
+  }
+
+  validateAiTriggerKeyword(config) {
+    const raw = config?.search?.ai_trigger_keyword;
+    if (raw === undefined || raw === null || raw === '') return { valid: true };
+
+    if (typeof raw !== 'string') {
+      return {
+        valid: false,
+        min: MIN_AI_TRIGGER_KEYWORD_LENGTH,
+        max: MAX_AI_TRIGGER_KEYWORD_LENGTH,
+        message: 'AI search trigger keyword must be a string.',
+      };
+    }
+
+    const sanitized = sanitizeAiTriggerKeyword(raw);
+
+    if (!sanitized && raw.trim().length > 0) {
+      return {
+        valid: false,
+        min: MIN_AI_TRIGGER_KEYWORD_LENGTH,
+        max: MAX_AI_TRIGGER_KEYWORD_LENGTH,
+        message: `AI search trigger keyword must be ${MIN_AI_TRIGGER_KEYWORD_LENGTH}-${MAX_AI_TRIGGER_KEYWORD_LENGTH} characters.`,
+      };
+    }
+
+    // Store the normalized form so what is persisted is what will be matched.
+    config.search.ai_trigger_keyword = sanitized;
+    return { valid: true };
   }
 
   // Save configuration with password
@@ -185,6 +268,16 @@ class ConfigApi {
 
       if (!password) {
         return res.status(400).json({ error: 'Password is required' });
+      }
+
+      // Only worth asking on an instance that gates creation at all: with no addon
+      // password, anyone may create a configuration and the permission decides
+      // nothing. Signing in is likewise the only way to hold one, so a request
+      // without a session is left to the addon password below.
+      if (process.env.ADDON_PASSWORD && req.session && !hasPermission(req, 'createConfig')) {
+        return res.status(403).json({
+          error: 'Your account is not allowed to create configurations',
+        });
       }
 
       // Check addon password if one is set
@@ -210,6 +303,23 @@ class ConfigApi {
           error: catalogCheck.message,
           catalogCount: catalogCheck.count,
           maxCatalogs: catalogCheck.max,
+        });
+      }
+
+      const tagCheck = this.validateTagNames(config);
+      if (!tagCheck.valid) {
+        return res.status(400).json({
+          error: tagCheck.message,
+          maxTagNameLength: tagCheck.max,
+        });
+      }
+
+      const aiKeywordCheck = this.validateAiTriggerKeyword(config);
+      if (!aiKeywordCheck.valid) {
+        return res.status(400).json({
+          error: aiKeywordCheck.message,
+          minAiTriggerKeywordLength: aiKeywordCheck.min,
+          maxAiTriggerKeywordLength: aiKeywordCheck.max,
         });
       }
 
@@ -242,12 +352,15 @@ class ConfigApi {
       // This helps with cache invalidation
       configWithTimestamp.configVersion = Date.now();
       
-      await database.saveUserConfig(userUUID, passwordHash, configWithTimestamp);
+      const persistedConfig = await database.saveUserConfig(userUUID, passwordHash, configWithTimestamp);
       logger.info(`Saved config for user ${userUUID}`);
-      
-      // Invalidate memory cache
-      configCache.del(userUUID);
-      
+
+      if (persistedConfig) {
+        await configCache.set(userUUID, persistedConfig);
+      } else {
+        await configCache.del(userUUID);
+      }
+
       // Always trust the UUID after creation
       await database.trustUUID(userUUID);
       
@@ -285,7 +398,7 @@ class ConfigApi {
             const mdblistChanged = config.apiKeys.mdblist !== oldConfig.apiKeys.mdblist;
             
             if (rpdbChanged || mdblistChanged) {
-              patterns.push(`v*:catalog:${userUUID}:*`);
+              patterns.push(`e*:catalog:${userUUID}:*`);
               logger.debug(`API keys changed - RPDB: ${rpdbChanged}, MDBList: ${mdblistChanged} - clearing user's catalog cache`);
             }
           }
@@ -351,7 +464,7 @@ class ConfigApi {
             );
             if (providersChanged) {
               logger.info('Providers changed - clearing user catalog cache to avoid stale meta provider data');
-              patterns.push(`v*:catalog:${userUUID}:*`);
+              patterns.push(`e*:catalog:${userUUID}:*`);
             }
           } else {
             logger.debug('No providers to compare - old:', oldConfig?.providers, 'new:', config.providers);
@@ -388,7 +501,7 @@ class ConfigApi {
             if (mdblistChanged) {
               // Clear cache for specific MDBList catalogs that changed
               for (const catalogId of changedCatalogs) {
-                const pattern = `v*:catalog:${userUUID}:*${catalogId}*`;
+                const pattern = `e*:catalog:${userUUID}:*${catalogId}*`;
                 patterns.push(pattern);
                 logger.debug(`Added cache invalidation pattern for MDBList catalog: ${pattern}`);
               }
@@ -428,12 +541,7 @@ class ConfigApi {
         // Don't fail the config save if cache invalidation fails
       }
       
-      const hostEnv = process.env.HOST_NAME;
-      const baseUrl = hostEnv
-        ? (hostEnv.startsWith('http') ? hostEnv : `https://${hostEnv}`)
-        : `https://${req.get('host')}`;
-
-      const installUrl = `${baseUrl}/stremio/${userUUID}/manifest.json`;
+      const installUrl = buildInstallUrl(process.env.HOST_NAME, req.get('host'), manifestIdentifier(userUUID));
 
       res.json({
         success: true,
@@ -442,6 +550,7 @@ class ConfigApi {
         message: existingUUID ? 'Configuration updated successfully' : 'Configuration saved successfully'
       });
     } catch (error) {
+      if (respondIfSigninRequired(error, res)) return;
       logger.error('Save config error:', error);
       res.status(500).json({ error: 'Failed to save configuration' });
     }
@@ -459,6 +568,27 @@ class ConfigApi {
       if (!userUUID) {
         return res.status(400).json({ error: 'User UUID is required' });
       }
+
+      // A signed-in owner has already proved who they are, so the configuration
+      // password is not asked for again. It was verified once, when the
+      // configuration was saved to the account.
+      const accountId = req.session?.accountId;
+      if (accountId && await database.ownsConfig(accountId, userUUID)) {
+        const owned = await database.getUserConfig(userUUID);
+        if (owned) {
+          await database.touchAccountConfig(accountId, userUUID);
+          return res.json({
+            success: true,
+            userUUID,
+            installUrl: buildInstallUrl(process.env.HOST_NAME, req.get('host'), manifestIdentifier(userUUID)),
+            config: {
+              ...owned,
+              apiKeys: { ...owned.apiKeys, customDescriptionBlurb: undefined },
+            },
+          });
+        }
+      }
+
       if (!password) {
         return res.status(400).json({ error: 'Password is required' });
       }
@@ -490,6 +620,9 @@ class ConfigApi {
       res.json({
         success: true,
         userUUID,
+        // The frontend cannot rebuild this: manifestIdentifier may resolve to a
+        // user alias rather than the UUID, and the alias endpoints are admin-only.
+        installUrl: buildInstallUrl(process.env.HOST_NAME, req.get('host'), manifestIdentifier(userUUID)),
         config: sanitizedConfig
       });
     } catch (error) {
@@ -512,7 +645,13 @@ class ConfigApi {
         return res.status(400).json({ error: 'User UUID is required' });
       }
 
-      if (!password) {
+      // A signed-in owner saves without the password. Its hash is left exactly
+      // as it was, so the configuration keeps working for anyone loading it the
+      // usual way.
+      const accountId = req.session?.accountId;
+      const ownsConfig = Boolean(accountId) && await database.ownsConfig(accountId, userUUID);
+
+      if (!password && !ownsConfig) {
         return res.status(400).json({ error: 'Password is required' });
       }
 
@@ -520,9 +659,10 @@ class ConfigApi {
         return res.status(400).json({ error: 'Configuration data is required' });
       }
 
-      // Check if UUID is trusted
+      // Check if UUID is trusted. An owner signed in to this instance has
+      // already been let in, so the shared addon password is not asked again.
       const isTrusted = await database.isUUIDTrusted(userUUID);
-      if (!isTrusted && process.env.ADDON_PASSWORD && process.env.ADDON_PASSWORD.length > 0) {
+      if (!ownsConfig && !isTrusted && process.env.ADDON_PASSWORD && process.env.ADDON_PASSWORD.length > 0) {
         if (!addonPassword || addonPassword !== process.env.ADDON_PASSWORD) {
           return res.status(401).json({ error: 'Invalid addon password. Contact the addon administrator.' });
         }
@@ -547,17 +687,42 @@ class ConfigApi {
         });
       }
 
+      const tagCheck = this.validateTagNames(config);
+      if (!tagCheck.valid) {
+        return res.status(400).json({
+          error: tagCheck.message,
+          maxTagNameLength: tagCheck.max,
+        });
+      }
+
+      const aiKeywordCheck = this.validateAiTriggerKeyword(config);
+      if (!aiKeywordCheck.valid) {
+        return res.status(400).json({
+          error: aiKeywordCheck.message,
+          minAiTriggerKeywordLength: aiKeywordCheck.min,
+          maxAiTriggerKeywordLength: aiKeywordCheck.max,
+        });
+      }
+
       await this.sanitizeTraktToken(config);
       await this.sanitizeSimklToken(config);
 
       // Verify existing config exists
-      const existingConfig = await database.verifyUserAndGetConfig(userUUID, password);
-      if (!existingConfig) {
-        return res.status(401).json({ error: 'Invalid UUID or password' });
+      let passwordHash;
+      if (ownsConfig && !password) {
+        const existingUser = await database.getUser(userUUID);
+        if (!existingUser) {
+          return res.status(404).json({ error: 'Configuration not found' });
+        }
+        passwordHash = existingUser.password_hash;
+      } else {
+        const existingConfig = await database.verifyUserAndGetConfig(userUUID, password);
+        if (!existingConfig) {
+          return res.status(401).json({ error: 'Invalid UUID or password' });
+        }
+        // Hash the password with bcrypt
+        passwordHash = await database.hashPassword(password);
       }
-
-      // Hash the password with bcrypt
-      const passwordHash = await database.hashPassword(password);
       
       // Get old config to compare changes
       let oldConfig = null;
@@ -578,12 +743,15 @@ class ConfigApi {
       };
       
       // Update the configuration
-      await database.saveUserConfig(userUUID, passwordHash, configWithTimestamp);
+      const persistedConfig = await database.saveUserConfig(userUUID, passwordHash, configWithTimestamp);
       logger.debug(`Updated config for user ${userUUID} with configVersion: ${configWithTimestamp.configVersion}`);
       logger.debug(`Previous configVersion was: ${oldConfig?.configVersion || 'none'}`);
-      
-      // Invalidate memory cache
-      configCache.del(userUUID);
+
+      if (persistedConfig) {
+        await configCache.set(userUUID, persistedConfig);
+      } else {
+        await configCache.del(userUUID);
+      }
       
       // Invalidate user's cache when config changes
       try {
@@ -619,7 +787,7 @@ class ConfigApi {
             const mdblistChanged = config.apiKeys.mdblist !== oldConfig.apiKeys.mdblist;
             
             if (rpdbChanged || mdblistChanged) {
-              patterns.push(`v*:catalog:${userUUID}:*`);
+              patterns.push(`e*:catalog:${userUUID}:*`);
               logger.debug(`API keys changed - RPDB: ${rpdbChanged}, MDBList: ${mdblistChanged} - clearing user's catalog cache`);
             }
           }
@@ -706,7 +874,7 @@ class ConfigApi {
             );
             if (providersChanged) {
               logger.info('Providers changed - clearing user catalog cache to avoid stale meta provider data');
-              patterns.push(`v*:catalog:${userUUID}:*`);
+              patterns.push(`e*:catalog:${userUUID}:*`);
             }
           }
 
@@ -736,7 +904,7 @@ class ConfigApi {
             if (mdblistChanged) {
               // Clear cache for specific MDBList catalogs that changed
               for (const catalogId of changedCatalogs) {
-                const pattern = `v*:catalog:${userUUID}:*${catalogId}*`;
+                const pattern = `e*:catalog:${userUUID}:*${catalogId}*`;
                 patterns.push(pattern);
                 logger.debug(`Added cache invalidation pattern for MDBList catalog: ${pattern}`);
               }
@@ -770,18 +938,14 @@ class ConfigApi {
         logger.error(`Error accessing Redis for cache invalidation:`, redisError);
       }
       
-      const hostEnv2 = process.env.HOST_NAME;
-      const baseUrl2 = hostEnv2
-        ? (hostEnv2.startsWith('http') ? hostEnv2 : `https://${hostEnv2}`)
-        : `https://${req.get('host')}`;
-      
       res.json({
         success: true,
         userUUID,
-        installUrl: `${baseUrl2}/stremio/${userUUID}/manifest.json`,
+        installUrl: buildInstallUrl(process.env.HOST_NAME, req.get('host'), manifestIdentifier(userUUID)),
         message: 'Configuration updated successfully'
       });
     } catch (error) {
+      if (respondIfSigninRequired(error, res)) return;
       logger.error('Update config error:', error);
       res.status(500).json({ error: 'Failed to update configuration' });
     }
@@ -812,17 +976,14 @@ class ConfigApi {
 
       const config = await database.getUserConfig(userUUID);
 
-      const hostEnv3 = process.env.HOST_NAME;
-      const baseUrl3 = hostEnv3
-        ? (hostEnv3.startsWith('http') ? hostEnv3 : `https://${hostEnv3}`)
-        : `https://${req.get('host')}`;
       res.json({
         success: true,
         userUUID,
-        installUrl: `${baseUrl3}/stremio/${userUUID}/manifest.json`,
+        installUrl: buildInstallUrl(process.env.HOST_NAME, req.get('host'), manifestIdentifier(userUUID)),
         message: 'Migration completed successfully'
       });
     } catch (error) {
+      if (respondIfSigninRequired(error, res)) return;
       logger.error('Migration error:', error);
       res.status(500).json({ error: 'Failed to migrate data' });
     }
@@ -917,9 +1078,17 @@ class ConfigApi {
           });
         }
 
-        // Default posterRatingProvider for configs that predate the field
-        if (!config.posterRatingProvider && (config.apiKeys?.rpdb || config.apiKeys?.topPoster)) {
-          config.posterRatingProvider = config.apiKeys?.topPoster ? 'top' : 'rpdb';
+        if (!config.posterRatingProvider) {
+          const pattern = (config.customPosterUrlPattern || '').trim();
+          if (pattern.includes('ratingposterdb.com')) {
+            config.posterRatingProvider = 'rpdb';
+          } else if (pattern.includes('top-posters.com')) {
+            config.posterRatingProvider = 'top';
+          } else if (pattern) {
+            config.posterRatingProvider = 'custom';
+          } else {
+            config.posterRatingProvider = 'none';
+          }
         }
 
         // Strip instance-specific fields that shouldn't be returned from saved config
@@ -1029,8 +1198,9 @@ class ConfigApi {
         continue;
       }
 
-      if (trimmedValue.length > TEST_API_KEY_MAX_LENGTH) {
-        return { error: `API key '${key}' exceeds max length (${TEST_API_KEY_MAX_LENGTH}).` };
+      const maxKeyLength = getTestApiKeyMaxLength();
+      if (trimmedValue.length > maxKeyLength) {
+        return { error: `API key '${key}' exceeds max length (${maxKeyLength}).` };
       }
 
       normalizedApiKeys[key] = trimmedValue;

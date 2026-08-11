@@ -1,136 +1,133 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ComponentType, type LazyExoticComponent } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { lazy, Suspense, useEffect, useRef, useState, type ComponentType, type LazyExoticComponent } from "react";
+import { motion } from "framer-motion";
 import {
   ChevronLeft, ChevronRight,
   Sparkles, SlidersHorizontal, KeyRound, Film, Paintbrush,
   Filter, Search, LayoutGrid, Settings2,
 } from "lucide-react";
-import { Skeleton } from "@/components/ui/skeleton";
+import { SectionSkeleton } from '@/components/settings/SectionSkeleton';
+import { SectionErrorBoundary } from '@/components/settings/SectionErrorBoundary';
+import { SECTION_SKELETONS, GENERIC_SKELETON } from '@/lib/sectionSkeletons';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useBreakpoint } from '@/hooks/use-breakpoint';
+import { useSettingsRoute } from '@/hooks/useSettingsRoute';
+import { useAnchorFocus } from '@/hooks/useAnchorFocus';
+import { SettingsSearch } from '@/components/settings/SettingsSearch';
+import { useConfig } from '@/contexts/ConfigContext';
+import { MobileSaveBar } from '@/components/layout/MobileSaveBar';
+import { SidebarSaveButton } from '@/components/layout/SidebarSaveButton';
+import {
+  SETTINGS_SECTIONS,
+  adjacentSections,
+  hasExplicitSection,
+  hashFor,
+  isExistingConfigUrl,
+  isSettingsSectionId,
+  parseRoute,
+  type SettingsSectionId,
+} from '@/lib/settingsRoute';
 import { cn } from '@/lib/utils';
 
-const LazyPresetManager = lazy(() =>
-  import('./sections/PresetManager').then((module) => ({ default: module.PresetManager }))
-);
-const LazyGeneralSettings = lazy(() =>
-  import('./sections/GeneralSettings').then((module) => ({ default: module.GeneralSettings }))
-);
-const LazyIntegrationsSettings = lazy(() =>
-  import('./sections/IntegrationsSettings').then((module) => ({ default: module.IntegrationsSettings }))
-);
-const LazyProvidersSettings = lazy(() =>
-  import('./sections/ProvidersSettings').then((module) => ({ default: module.ProvidersSettings }))
-);
-const LazyArtProviderSettings = lazy(() =>
-  import('./sections/ArtProviderSettings').then((module) => ({ default: module.ArtProviderSettings }))
-);
-const LazyFiltersSettings = lazy(() =>
-  import('./sections/FiltersSettings').then((module) => ({ default: module.FiltersSettings }))
-);
-const LazyCatalogsSettings = lazy(() =>
-  import('./sections/CatalogsSettings').then((module) => ({ default: module.CatalogsSettings }))
-);
-const LazySearchSettings = lazy(() =>
-  import('./sections/SearchSettings').then((module) => ({ default: module.SearchSettings }))
-);
-const LazyConfigurationManager = lazy(() =>
-  import('./ConfigurationManager').then((module) => ({ default: module.ConfigurationManager }))
-);
+const SECTION_IMPORTS: Record<SettingsSectionId, () => Promise<{ default: ComponentType }>> = {
+  'presets': () => import('./setup/SetupPage').then((m) => ({ default: m.SetupPage as ComponentType })),
+  'general': () => import('./sections/GeneralSettings').then((m) => ({ default: m.GeneralSettings as ComponentType })),
+  'integrations': () => import('./sections/IntegrationsSettings').then((m) => ({ default: m.IntegrationsSettings as ComponentType })),
+  'providers': () => import('./sections/ProvidersSettings').then((m) => ({ default: m.ProvidersSettings as ComponentType })),
+  'art-providers': () => import('./sections/ArtProviderSettings').then((m) => ({ default: m.ArtProviderSettings as ComponentType })),
+  'filters': () => import('./sections/FiltersSettings').then((m) => ({ default: m.FiltersSettings as ComponentType })),
+  'search': () => import('./sections/SearchSettings').then((m) => ({ default: m.SearchSettings as ComponentType })),
+  'catalogs': () => import('./sections/CatalogsSettings').then((m) => ({ default: m.CatalogsSettings as ComponentType })),
+  'configuration': () => import('./ConfigurationManager').then((m) => ({ default: m.ConfigurationManager as ComponentType })),
+};
+
+function preloadSection(id: SettingsSectionId): void {
+  void SECTION_IMPORTS[id]().catch(() => {});
+}
+
 const LazyDashboard = lazy(() =>
   import('./dashboard/Dashboard').then((module) => ({ default: module.Dashboard }))
 );
 const LazyRatingPage = lazy(() => import('./RatingPage'));
+const LazySetupPage = lazy(() => import('./setup/SetupPage').then((m) => ({ default: m.SetupPage })));
 
-const settingsPages = [
-  { value: 'presets', title: 'Presets', Component: LazyPresetManager, icon: Sparkles },
-  { value: 'general', title: 'General', Component: LazyGeneralSettings, icon: SlidersHorizontal },
-  { value: 'integrations', title: 'Integrations', Component: LazyIntegrationsSettings, icon: KeyRound },
-  { value: 'providers', title: 'Meta Providers', Component: LazyProvidersSettings, icon: Film },
-  { value: 'art-providers', title: 'Art Providers', Component: LazyArtProviderSettings, icon: Paintbrush },
-  { value: 'filters', title: 'Filters', Component: LazyFiltersSettings, icon: Filter },
-  { value: 'search', title: 'Search', Component: LazySearchSettings, icon: Search },
-  { value: 'catalogs', title: 'Catalogs', Component: LazyCatalogsSettings, icon: LayoutGrid },
-  { value: 'configuration', title: 'Configuration', Component: LazyConfigurationManager, icon: Settings2 },
-] as const;
-type SettingsPageValue = (typeof settingsPages)[number]['value'];
 const SETTINGS_LAYOUT_NAVIGATE_EVENT = 'settings-layout:navigate';
 
-function SectionFallback({ title }: { title: string }) {
-  return (
-    <div className="rounded-lg border bg-muted/20 p-5 space-y-3">
-      <div className="text-sm font-medium text-muted-foreground">Loading {title.toLowerCase()}...</div>
-      <Skeleton className="h-4 w-40" />
-      <Skeleton className="h-16 w-full" />
-      <Skeleton className="h-24 w-full" />
-    </div>
-  );
-}
+const SECTION_SCROLL_MARGIN = 24;
 
-function renderPage(page: (typeof settingsPages)[number]) {
-  const PageComponent = page.Component as LazyExoticComponent<ComponentType>;
-  return (
-    <Suspense fallback={<SectionFallback title={page.title} />}>
-      <PageComponent />
-    </Suspense>
-  );
-}
+/** Joined to SETTINGS_SECTIONS by id — the route model cannot hold components. */
+const SECTION_VIEWS: Record<SettingsSectionId, {
+  Component: LazyExoticComponent<ComponentType>;
+  icon: typeof Sparkles;
+}> = {
+  'presets': { Component: lazy(SECTION_IMPORTS['presets']), icon: Sparkles },
+  'general': { Component: lazy(SECTION_IMPORTS['general']), icon: SlidersHorizontal },
+  'integrations': { Component: lazy(SECTION_IMPORTS['integrations']), icon: KeyRound },
+  'providers': { Component: lazy(SECTION_IMPORTS['providers']), icon: Film },
+  'art-providers': { Component: lazy(SECTION_IMPORTS['art-providers']), icon: Paintbrush },
+  'filters': { Component: lazy(SECTION_IMPORTS['filters']), icon: Filter },
+  'search': { Component: lazy(SECTION_IMPORTS['search']), icon: Search },
+  'catalogs': { Component: lazy(SECTION_IMPORTS['catalogs']), icon: LayoutGrid },
+  'configuration': { Component: lazy(SECTION_IMPORTS['configuration']), icon: Settings2 },
+};
 
 export function SettingsLayout() {
   const { isMobile } = useBreakpoint();
-  const [activeSection, setActiveSection] = useState<SettingsPageValue>('presets');
-  const [activeMobileSection, setActiveMobileSection] = useState<SettingsPageValue | undefined>(undefined);
-  const isScrollingRef = useRef(false);
+  const { section, anchor, navigate, focusNonce, refocus } = useSettingsRoute();
+  const { config } = useConfig();
+  const [setupDismissed, setSetupDismissed] = useState(false);
+  // Latched once the user applies, because that flips catalogSetupComplete and would
+  // otherwise unmount the page they are still standing on.
+  const [setupEngaged, setSetupEngaged] = useState(false);
+  const eligibleForSetup =
+    !hasExplicitSection(window.location.hash) && !isExistingConfigUrl(window.location.pathname);
+  // Reads the flag live so a config arriving from sign-in dismisses the takeover.
+  const isFirstRun =
+    !setupDismissed && (setupEngaged || (eligibleForSetup && config.catalogSetupComplete === false));
+  const isFirstRender = useRef(true);
+  const mainRef = useRef<HTMLElement | null>(null);
+  useAnchorFocus(anchor, focusNonce, mainRef);
 
-  const scrollToSection = useCallback((value: string) => {
-    isScrollingRef.current = true;
-    setActiveSection(value as SettingsPageValue);
-    const el = document.getElementById(value);
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-    setTimeout(() => { isScrollingRef.current = false; }, 800);
-  }, []);
+  const handleSearchSelect = (target: SettingsSectionId, targetAnchor: string | null) => {
+    navigate(target, targetAnchor);
+    refocus();
+  };
 
   useEffect(() => {
-    if (isMobile) return;
-    const handleScroll = () => {
-      if (isScrollingRef.current) return;
-      const offset = 120;
-      let current: SettingsPageValue = settingsPages[0].value;
-      for (const page of settingsPages) {
-        const el = document.getElementById(page.value);
-        if (el) {
-          const rect = el.getBoundingClientRect();
-          if (rect.top <= offset) {
-            current = page.value;
-          }
-        }
-      }
-      setActiveSection(current);
-    };
-    window.addEventListener('scroll', handleScroll, { passive: true });
-    handleScroll();
-    return () => window.removeEventListener('scroll', handleScroll);
-  }, [isMobile]);
+    // Writing a section into the URL during first run would make a refresh look like an
+    // explicit request for that section, skipping setup.
+    if (isFirstRun) return;
+    const route = parseRoute(window.location.hash);
+    const canonical = hashFor(route.section, route.anchor);
+    if (window.location.hash !== canonical) {
+      window.history.replaceState(
+        null,
+        '',
+        `${window.location.pathname}${window.location.search}${canonical}`
+      );
+    }
+  }, [isFirstRun]);
+
+  useEffect(() => {
+    if (isFirstRender.current) {
+      isFirstRender.current = false;
+      return;
+    }
+    if (parseRoute(window.location.hash).anchor) return;
+    const main = mainRef.current;
+    const top = main
+      ? Math.max(0, main.getBoundingClientRect().top + window.scrollY - SECTION_SCROLL_MARGIN)
+      : 0;
+    window.scrollTo({ top, behavior: 'auto' });
+  }, [section]);
 
   useEffect(() => {
     const handleNavigate = (event: Event) => {
-      const customEvent = event as CustomEvent<{ tab?: string; scrollToTop?: boolean }>;
-      const nextTab = customEvent.detail?.tab;
-      if (!nextTab) return;
-      const isKnown = settingsPages.some((page) => page.value === nextTab);
-      if (!isKnown) return;
-
-      if (isMobile) {
-        setActiveMobileSection(nextTab as SettingsPageValue);
-        window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'auto' }));
-      } else {
-        scrollToSection(nextTab);
-      }
+      const tab = (event as CustomEvent<{ tab?: string }>).detail?.tab;
+      if (tab && isSettingsSectionId(tab)) navigate(tab);
     };
     window.addEventListener(SETTINGS_LAYOUT_NAVIGATE_EVENT, handleNavigate as EventListener);
     return () => window.removeEventListener(SETTINGS_LAYOUT_NAVIGATE_EVENT, handleNavigate as EventListener);
-  }, [isMobile, scrollToSection]);
+  }, [navigate]);
 
   const windowFlags = typeof window !== 'undefined'
     ? (window as Window & { DASHBOARD_MODE?: boolean; RATING_MODE?: boolean })
@@ -139,150 +136,134 @@ export function SettingsLayout() {
   const isRatingMode = !!windowFlags?.RATING_MODE;
 
   if (isRatingMode) {
+    const skeleton = <SectionSkeleton spec={GENERIC_SKELETON} label="ratings" />;
     return (
       <div className="w-full">
-        <Suspense fallback={<SectionFallback title="rating" />}>
-          <LazyRatingPage />
-        </Suspense>
+        <SectionErrorBoundary label="Ratings" fallback={skeleton}>
+          <Suspense fallback={skeleton}>
+            <LazyRatingPage />
+          </Suspense>
+        </SectionErrorBoundary>
       </div>
     );
   }
 
   if (isDashboardMode) {
+    const skeleton = <SectionSkeleton spec={GENERIC_SKELETON} label="dashboard" />;
     return (
       <div className="w-full">
-        <Suspense fallback={<SectionFallback title="dashboard" />}>
-          <LazyDashboard />
-        </Suspense>
+        <SectionErrorBoundary label="Dashboard" fallback={skeleton}>
+          <Suspense fallback={skeleton}>
+            <LazyDashboard />
+          </Suspense>
+        </SectionErrorBoundary>
       </div>
     );
   }
 
-  // --- MOBILE: push-pop navigation ---
-  if (isMobile) {
-    const activePage = settingsPages.find(p => p.value === activeMobileSection);
-    const activePageIndex = activeMobileSection
-      ? settingsPages.findIndex(p => p.value === activeMobileSection)
-      : -1;
-    const prevPage = activePageIndex > 0 ? settingsPages[activePageIndex - 1] : null;
-    const nextPage = activePageIndex >= 0 && activePageIndex < settingsPages.length - 1
-      ? settingsPages[activePageIndex + 1]
-      : null;
-    const goToSection = (value: SettingsPageValue) => {
-      setActiveMobileSection(value);
-      window.requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'auto' }));
-    };
-
+  if (isFirstRun) {
+    const skeleton = <SectionSkeleton spec={SECTION_SKELETONS['presets'] ?? GENERIC_SKELETON} label="setup" />;
     return (
-      <div className="w-full overflow-hidden">
-        <AnimatePresence mode="wait" initial={false}>
-          {!activeMobileSection ? (
-            <motion.div
-              key="menu"
-              initial={{ opacity: 0, x: -60 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -60 }}
-              transition={{ type: "tween", duration: 0.2, ease: "easeOut" }}
-              className="space-y-1"
-            >
-              <div className="rounded-xl border border-white/[0.06] bg-card/80 backdrop-blur-sm overflow-hidden">
-                {settingsPages.map((page, index) => {
-                  const Icon = page.icon;
-                  return (
-                    <button
-                      key={page.value}
-                      onClick={() => setActiveMobileSection(page.value)}
-                      className={`flex items-center justify-between w-full px-4 py-3.5 text-left transition-colors active:bg-white/[0.04] ${
-                        index < settingsPages.length - 1 ? 'border-b border-white/[0.04]' : ''
-                      }`}
-                    >
-                      <div className="flex items-center gap-3">
-                        <Icon className="h-4 w-4 text-muted-foreground" />
-                        <span className="text-[15px] font-medium text-foreground">{page.title}</span>
-                      </div>
-                      <ChevronRight className="h-4 w-4 text-muted-foreground/50" />
-                    </button>
-                  );
-                })}
-              </div>
-
-              <div className="flex justify-center pt-6">
-                <button
-                  onClick={() => window.open('https://buymeacoffee.com/cedya', '_blank')}
-                  aria-label="Buy me a coffee"
-                  className="inline-block"
-                >
-                  <img
-                    src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png"
-                    alt="Buy Me A Coffee"
-                    className="h-12 w-auto hover:opacity-90 transition-opacity"
-                  />
-                </button>
-              </div>
-            </motion.div>
-          ) : (
-            <motion.div
-              key={activeMobileSection}
-              initial={{ opacity: 0, x: 60 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: 60 }}
-              transition={{ type: "tween", duration: 0.2, ease: "easeOut" }}
-            >
-              <button
-                onClick={() => setActiveMobileSection(undefined)}
-                className="flex items-center gap-1 mb-4 -ml-1 py-1.5 px-2 rounded-lg text-muted-foreground active:bg-white/[0.04] transition-colors"
-              >
-                <ChevronLeft className="h-4 w-4" />
-                <span className="text-sm font-medium">Settings</span>
-              </button>
-              <h2 className="text-xl font-semibold mb-4">{activePage?.title}</h2>
-              {activePage && renderPage(activePage)}
-
-              <div className="mt-8 flex items-stretch gap-2">
-                <button
-                  onClick={() => prevPage && goToSection(prevPage.value)}
-                  disabled={!prevPage}
-                  className="flex-1 min-w-0 flex items-center gap-2 rounded-xl border border-white/[0.06] bg-card/80 backdrop-blur-sm px-3 py-3 text-left transition-colors active:bg-white/[0.04] disabled:opacity-40 disabled:active:bg-transparent"
-                  aria-label={prevPage ? `Previous: ${prevPage.title}` : 'No previous section'}
-                >
-                  <ChevronLeft className="h-5 w-5 shrink-0 text-muted-foreground" />
-                  <div className="min-w-0 flex-1">
-                    <div className="text-[11px] uppercase tracking-wide text-muted-foreground/70">Previous</div>
-                    <div className="truncate text-sm font-medium text-foreground">{prevPage?.title ?? '—'}</div>
-                  </div>
-                </button>
-                <button
-                  onClick={() => nextPage && goToSection(nextPage.value)}
-                  disabled={!nextPage}
-                  className="flex-1 min-w-0 flex items-center gap-2 rounded-xl border border-white/[0.06] bg-card/80 backdrop-blur-sm px-3 py-3 text-right transition-colors active:bg-white/[0.04] disabled:opacity-40 disabled:active:bg-transparent"
-                  aria-label={nextPage ? `Next: ${nextPage.title}` : 'No next section'}
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="text-[11px] uppercase tracking-wide text-muted-foreground/70">Next</div>
-                    <div className="truncate text-sm font-medium text-foreground">{nextPage?.title ?? '—'}</div>
-                  </div>
-                  <ChevronRight className="h-5 w-5 shrink-0 text-muted-foreground" />
-                </button>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+      <div className="w-full">
+        <SectionErrorBoundary label="Setup" fallback={skeleton}>
+          <Suspense fallback={skeleton}>
+            <LazySetupPage
+              variant="fullscreen"
+              onApplied={() => setSetupEngaged(true)}
+              onExit={(target) => { setSetupDismissed(true); navigate(target); }}
+            />
+          </Suspense>
+        </SectionErrorBoundary>
       </div>
     );
   }
 
-  // --- DESKTOP: sidebar + scroll-spy ---
+  const current = SETTINGS_SECTIONS.find(s => s.id === section)!;
+  const { Component } = SECTION_VIEWS[section];
+  const { prev, next } = adjacentSections(section);
+
+  const sectionSkeleton = <SectionSkeleton spec={SECTION_SKELETONS[section]} label={current.title} />;
+
+  const sectionContent = (
+    <SectionErrorBoundary key={section} label={current.title} fallback={sectionSkeleton}>
+      <Suspense fallback={sectionSkeleton}>
+        <Component />
+      </Suspense>
+    </SectionErrorBoundary>
+  );
+
+  if (isMobile) {
+    return (
+      <div ref={(el) => { mainRef.current = el; }} className="w-full">
+        <div className="mb-3">
+          <SettingsSearch onSelect={handleSearchSelect} />
+        </div>
+
+        <div className="mb-4">
+          <Select value={section} onValueChange={(value) => navigate(value as SettingsSectionId)}>
+            <SelectTrigger aria-label="Settings section" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {SETTINGS_SECTIONS.map(s => (
+                <SelectItem key={s.id} value={s.id}>{s.title}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+
+        {sectionContent}
+
+        <div className="mt-8 flex items-stretch gap-2">
+          <button
+            onClick={() => prev && navigate(prev.id)}
+            disabled={!prev}
+            className="flex-1 min-w-0 flex items-center gap-2 rounded-xl border border-white/[0.06] bg-card/80 backdrop-blur-sm px-3 py-3 text-left transition-colors active:bg-white/[0.04] disabled:opacity-40 disabled:active:bg-transparent"
+            aria-label={prev ? `Previous: ${prev.title}` : 'No previous section'}
+          >
+            <ChevronLeft className="h-5 w-5 shrink-0 text-muted-foreground" />
+            <div className="min-w-0 flex-1">
+              <div className="text-[11px] uppercase tracking-wide text-muted-foreground/70">Previous</div>
+              <div className="truncate text-sm font-medium text-foreground">{prev?.title ?? '—'}</div>
+            </div>
+          </button>
+          <button
+            onClick={() => next && navigate(next.id)}
+            disabled={!next}
+            className="flex-1 min-w-0 flex items-center gap-2 rounded-xl border border-white/[0.06] bg-card/80 backdrop-blur-sm px-3 py-3 text-right transition-colors active:bg-white/[0.04] disabled:opacity-40 disabled:active:bg-transparent"
+            aria-label={next ? `Next: ${next.title}` : 'No next section'}
+          >
+            <div className="min-w-0 flex-1">
+              <div className="text-[11px] uppercase tracking-wide text-muted-foreground/70">Next</div>
+              <div className="truncate text-sm font-medium text-foreground">{next?.title ?? '—'}</div>
+            </div>
+            <ChevronRight className="h-5 w-5 shrink-0 text-muted-foreground" />
+          </button>
+        </div>
+
+        <MobileSaveBar />
+      </div>
+    );
+  }
+
   return (
     <div className="w-full flex gap-10">
       <aside className="w-52 shrink-0">
-        <nav className="sticky top-6 space-y-1 py-2">
-          {settingsPages.map((page) => {
-            const Icon = page.icon;
-            const isActive = activeSection === page.value;
+        <nav className="sticky top-6 z-50 space-y-1 py-2" aria-label="Settings sections">
+          <div className="mb-3">
+            <SettingsSearch onSelect={handleSearchSelect} />
+          </div>
+
+          {SETTINGS_SECTIONS.map((s) => {
+            const Icon = SECTION_VIEWS[s.id].icon;
+            const isActive = section === s.id;
             return (
               <button
-                key={page.value}
-                onClick={() => scrollToSection(page.value)}
+                key={s.id}
+                onClick={() => navigate(s.id)}
+                onPointerEnter={() => preloadSection(s.id)}
+                onFocus={() => preloadSection(s.id)}
+                aria-current={isActive ? 'page' : undefined}
                 className={cn(
                   "relative flex items-center gap-3 w-full px-3 py-2.5 rounded-lg text-sm transition-colors",
                   isActive
@@ -298,26 +279,17 @@ export function SettingsLayout() {
                   />
                 )}
                 <Icon className="relative z-10 h-4 w-4 shrink-0" />
-                <span className="relative z-10 font-medium">{page.title}</span>
+                <span className="relative z-10 font-medium">{s.title}</span>
               </button>
             );
           })}
+
+          <SidebarSaveButton />
         </nav>
       </aside>
 
-      <main className="flex-1 min-w-0 space-y-12 pb-32">
-        {settingsPages.map((page, index) => (
-          <section
-            key={page.value}
-            id={page.value}
-            className={cn(
-              "scroll-mt-6",
-              index < settingsPages.length - 1 && "border-b border-white/[0.06] pb-12"
-            )}
-          >
-            {renderPage(page)}
-          </section>
-        ))}
+      <main ref={mainRef} className="flex-1 min-w-0 pb-32">
+        {sectionContent}
       </main>
     </div>
   );

@@ -46,6 +46,8 @@ export const animeCatalogs: CatalogDefinition[] = [
   { id: 'mal.most_favorites', name: 'MAL Most Favorites', type: 'anime', source: 'mal', isEnabledByDefault: false, showOnHomeByDefault: true },
   { id: 'mal.most_popular', name: 'MAL Most Popular', type: 'anime', source: 'mal', isEnabledByDefault: false, showOnHomeByDefault: true },
   { id: 'mal.top_anime', name: 'MAL Top Anime', type: 'anime', source: 'mal', isEnabledByDefault: true, showOnHomeByDefault: true },
+  { id: 'mal.season_top', name: 'MAL Top Rated This Week', type: 'anime', source: 'mal', isEnabledByDefault: false, showOnHomeByDefault: true },
+  { id: 'mal.season_top_new', name: 'MAL Top New This Week', type: 'anime', source: 'mal', isEnabledByDefault: false, showOnHomeByDefault: true },
 ]
 
 // --- Catalogs requiring Authentication ---
@@ -100,18 +102,22 @@ export const allSearchProviders: SearchProviderDefinition[] = [
   { value: 'tmdb.search', label: 'TMDB Search', mediaType: ['movie', 'series'] },
   { value: 'tvdb.search', label: 'TheTVDB Search', mediaType: ['movie', 'series'] },
   { value: 'tvmaze.search', label: 'TVmaze Search', mediaType: ['series'] },
-  { value: 'trakt.search', label: 'Trakt Search', mediaType: ['movie', 'series'] },
+  { value: 'trakt.search', label: 'Trakt Search (VIP only)', mediaType: ['movie', 'series'] },
   { value: 'mdblist.search', label: 'MDBList Search', mediaType: ['movie', 'series'] },
+  { value: 'imdb.suggestions.search', label: 'IMDb Search', mediaType: ['movie', 'series'] },
+  { value: 'simkl.search', label: 'Simkl Search', mediaType: ['movie', 'series'] },
   // People Search Providers
   { value: 'tmdb.people.search', label: 'TMDB People Search', mediaType: ['movie', 'series'] },
   { value: 'tvdb.people.search', label: 'TheTVDB People Search', mediaType: ['movie', 'series'] },
-  { value: 'trakt.people.search', label: 'Trakt People Search', mediaType: ['movie', 'series'] },
+  { value: 'trakt.people.search', label: 'Trakt People Search (VIP only)', mediaType: ['movie', 'series'] },
 
   // Anime-Specific Providers
   { value: 'mal.search.movie', label: 'MAL (Movies)', mediaType: ['movie', 'anime_movie'] },
   { value: 'mal.search.series', label: 'MAL (Series)', mediaType: ['series', 'anime_series'] },
   { value: 'kitsu.search.movie', label: 'Kitsu (Movies)', mediaType: ['movie', 'anime_movie'] },
   { value: 'kitsu.search.series', label: 'Kitsu (Series)', mediaType: ['series', 'anime_series'] },
+  { value: 'simkl.search.movie', label: 'Simkl (Movies)', mediaType: ['anime_movie'] },
+  { value: 'simkl.search.series', label: 'Simkl (Series)', mediaType: ['anime_series'] },
 ];
 
 export const allCatalogDefinitions: CatalogDefinition[] = [

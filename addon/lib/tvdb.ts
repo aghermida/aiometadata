@@ -77,7 +77,7 @@ async function tvdbHttpRequest(url: string, options: any = {}, maxRetries: numbe
 }
 
 const TVDB_API_URL = 'https://api4.thetvdb.com/v4';
-const GLOBAL_TVDB_KEY = process.env.TVDB_API_KEY || process.env.BUILT_IN_TVDB_API_KEY;
+const globalTvdbKey = () => process.env.TVDB_API_KEY || process.env.BUILT_IN_TVDB_API_KEY;
 const TVDB_IMAGE_BASE = 'https://artworks.thetvdb.com/banners/images/';
 
 // Type definitions for TVDB API responses
@@ -471,7 +471,7 @@ const tokenCache = new Map<string, TokenCache>(); // One token per unique TVDB A
 const tokenInflight = new Map<string, Promise<string | null>>(); // Deduplicate concurrent logins per key
 
 async function getAuthToken(apiKey: string | undefined, userUUID: string | null = null): Promise<string | null> {
-  const key = apiKey || GLOBAL_TVDB_KEY;
+  const key = apiKey || globalTvdbKey();
   if (!key) {
     logger.error('TVDB API Key is not configured.');
     return null;
@@ -520,20 +520,28 @@ function _filterTvdbSearchResults(results: TvdbSearchResult[], query: string): T
     return [];
   }
 
+  const normalizedQuery = query.toLowerCase().replace(/[^a-z0-9]/g, '');
+
   const filteredResults = results.filter((item: TvdbSearchResult) => {
-    // Rule 1: Filter out items with "YouTube" as the network.
     if (item.network === 'YouTube') {
       return false;
     }
 
-    // Rule 2: Filter out items that have no network AND a missing/placeholder poster.
     const hasMissingPoster = !item.image_url || item.image_url.includes('/images/missing/');
     if (!item.network && hasMissingPoster) {
+      const normalizedName = item.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (normalizedName.includes(normalizedQuery) || normalizedQuery.includes(normalizedName)) {
+        return true;
+      }
       return false;
     }
-    
+
     return true;
   });
+
+  if (filteredResults.length === 0) {
+    return results.filter((item: TvdbSearchResult) => item.network !== 'YouTube');
+  }
 
   return filteredResults;
 }
@@ -709,7 +717,7 @@ async function getSeriesExtended(seriesId: string, config: UserConfig): Promise<
       requestTracker.trackProviderCall('tvdb', responseTime, false);
       
       logger.error(`[getSeriesExtended] Error fetching extended series data for TVDB ID ${seriesId}:`, (error as Error).message);
-      return null; 
+      throw error;
     }
   });
 }
@@ -788,7 +796,7 @@ async function _fetchEpisodesBySeasonType(tvdbId: string, seasonType: string, la
       page++;
     } catch(error) {
       logger.error(`[_fetchEpisodesBySeasonType] Error fetching page ${page} of ${seasonType} episodes for TVDB ID ${tvdbId}:`, (error as Error).message);
-      hasNextPage = false;
+      throw error;
     }
   }
   return { episodes: allEpisodes };

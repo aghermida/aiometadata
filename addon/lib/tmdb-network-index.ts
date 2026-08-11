@@ -8,8 +8,13 @@ const logger = consola.withTag('TMDB-Networks');
 const gunzipAsync = promisify(gunzip);
 
 const EXPORT_BASE_URL = 'https://files.tmdb.org/p/exports';
-const NETWORK_EXPORT_TTL = parseInt(process.env.TMDB_NETWORK_EXPORT_TTL || String(7 * 24 * 60 * 60), 10);
-const NETWORK_EXPORT_LOOKBACK_DAYS = parseInt(process.env.TMDB_NETWORK_EXPORT_LOOKBACK_DAYS || '7', 10);
+function networkExportTtl(): number {
+  return parseInt(process.env.TMDB_NETWORK_EXPORT_TTL || String(7 * 24 * 60 * 60), 10);
+}
+
+function networkExportLookbackDays(): number {
+  return parseInt(process.env.TMDB_NETWORK_EXPORT_LOOKBACK_DAYS || '7', 10);
+}
 
 interface TmdbNetworkExportEntry {
   id: number;
@@ -59,8 +64,8 @@ function normalizeNetworkName(value: string): string {
 function getExportDateCandidates(): Array<{ display: string; pathDate: string }> {
   const candidates: Array<{ display: string; pathDate: string }> = [];
   const now = new Date();
-  const lookbackDays = Number.isFinite(NETWORK_EXPORT_LOOKBACK_DAYS)
-    ? Math.max(1, NETWORK_EXPORT_LOOKBACK_DAYS)
+  const lookbackDays = Number.isFinite(networkExportLookbackDays())
+    ? Math.max(1, networkExportLookbackDays())
     : 7;
 
   for (let offset = 0; offset < lookbackDays; offset++) {
@@ -173,7 +178,7 @@ async function loadNetworkExport(): Promise<NetworkIndexPayload> {
 
   if (redis?.status === 'ready') {
     try {
-      await withTimeout(redis.setex(cacheKey, NETWORK_EXPORT_TTL, JSON.stringify(payload)), 1500, 'TMDB network cache write');
+      await withTimeout(redis.setex(cacheKey, networkExportTtl(), JSON.stringify(payload)), 1500, 'TMDB network cache write');
     } catch (error: any) {
       logger.warn(`Failed to write TMDB network cache: ${error.message}`);
     }
@@ -230,6 +235,53 @@ export async function resolveTmdbNetworkByName(name: string): Promise<ResolvedTm
   }
 
   return null;
+}
+
+export async function searchTmdbNetworks(query: string, limit: number = 25): Promise<ResolvedTmdbNetwork[]> {
+  const normalized = normalizeNetworkName(query);
+  if (!normalized) return [];
+
+  if (!initialized) {
+    await initializeTmdbNetworkIndex();
+  }
+
+  const seen = new Set<number>();
+  const results: ResolvedTmdbNetwork[] = [];
+  const push = (entry: ResolvedTmdbNetwork) => {
+    if (seen.has(entry.id)) return;
+    seen.add(entry.id);
+    results.push(entry);
+  };
+
+  const alias = NETWORK_ALIASES[normalized];
+  if (alias) push(alias);
+
+  for (const entry of (entriesByName.get(normalized) || []).slice().sort((a, b) => a.id - b.id)) {
+    push(entry);
+  }
+
+  const prefixMatches: ResolvedTmdbNetwork[] = [];
+  const substringMatches: ResolvedTmdbNetwork[] = [];
+  for (const [name, entries] of entriesByName) {
+    if (name === normalized) continue;
+    if (name.startsWith(normalized)) {
+      prefixMatches.push(...entries);
+    } else if (name.includes(normalized)) {
+      substringMatches.push(...entries);
+    }
+  }
+  prefixMatches.sort((a, b) => a.label.length - b.label.length || a.id - b.id);
+  substringMatches.sort((a, b) => a.label.length - b.label.length || a.id - b.id);
+  for (const entry of prefixMatches) {
+    if (results.length >= limit) break;
+    push(entry);
+  }
+  for (const entry of substringMatches) {
+    if (results.length >= limit) break;
+    push(entry);
+  }
+
+  return results.slice(0, limit);
 }
 
 export function getTmdbNetworkIndexStats() {
