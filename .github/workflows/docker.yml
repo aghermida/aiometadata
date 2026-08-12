@@ -23,6 +23,8 @@ jobs:
 
       - name: Sync fork with upstream
         run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote add upstream https://github.com/cedya77/aiometadata.git
           git fetch upstream
           if ! git merge upstream/dev --no-edit; then
