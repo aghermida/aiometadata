@@ -39,6 +39,13 @@ import { allCatalogDefinitions } from '@/data/catalogs';
 import { GenreSelection } from '@/data/genres';
 import { SelectionProvider, useSelection } from '@/contexts/SelectionContext';
 import { BulkActionBar } from '@/components/BulkActionBar';
+import { ScrollToTopButton } from '@/components/ScrollToTopButton';
+import {
+  catalogUsageKey,
+  describeCollectionUsage,
+  findCollectionUsage,
+  type CollectionUsage,
+} from '@/lib/collectionBuilder/collectionUsage';
 import { SelectAllControl } from '@/components/SelectAllControl';
 import { SelectByFieldControl } from '@/components/SelectByFieldControl';
 import { SelectByTagControl } from '@/components/SelectByTagControl';
@@ -2794,8 +2801,9 @@ const SortableCatalogItem = React.memo(({ catalog, onEditDiscover, onCustomize, 
   const [newName, setNewName] = useState(catalog.name);
   const [newType, setNewType] = useState(catalog.displayType || catalog.type);
   const [showSettings, setShowSettings] = useState(false);
-  const [showDisbandWarning, setShowDisbandWarning] = useState(false);
+  const [showDeleteWarning, setShowDeleteWarning] = useState(false);
   const [disbandTargetName, setDisbandTargetName] = useState('');
+  const [deleteUsage, setDeleteUsage] = useState<CollectionUsage | null>(null);
 
   const catalogKey = `${catalog.id}-${catalog.type}`;
   const selected = isSelected(catalogKey);
@@ -2965,12 +2973,17 @@ const SortableCatalogItem = React.memo(({ catalog, onEditDiscover, onCustomize, 
 
   const handleDelete = () => {
     const mergeName = wouldDisbandMerge();
-    if (mergeName) {
-      setDisbandTargetName(mergeName);
-      setShowDisbandWarning(true);
-    } else {
-      executeDelete();
+    const usage = findCollectionUsage(
+      config.collections,
+      new Set([catalogUsageKey(catalog.id, catalog.type)])
+    );
+    if (mergeName || usage.sources > 0) {
+      setDisbandTargetName(mergeName || '');
+      setDeleteUsage(usage.sources > 0 ? usage : null);
+      setShowDeleteWarning(true);
+      return;
     }
+    executeDelete();
   };
 
   const handleMoveToTop = () => {
@@ -3718,11 +3731,16 @@ const SortableCatalogItem = React.memo(({ catalog, onEditDiscover, onCustomize, 
         </DialogContent>
       </Dialog>
       <ConfirmDialog
-        isOpen={showDisbandWarning}
-        onClose={() => setShowDisbandWarning(false)}
-        onConfirm={() => { setShowDisbandWarning(false); executeDelete(); }}
-        title="This will disband a merged catalog"
-        description={`Deleting "${catalog.name}" will leave "${disbandTargetName}" with fewer than 2 sources, so it will be automatically disbanded.`}
+        isOpen={showDeleteWarning}
+        onClose={() => setShowDeleteWarning(false)}
+        onConfirm={() => { setShowDeleteWarning(false); executeDelete(); }}
+        title={disbandTargetName ? 'This will disband a merged catalog' : 'This catalog is used in a collection'}
+        description={[
+          disbandTargetName
+            ? `Deleting "${catalog.name}" will leave "${disbandTargetName}" with fewer than 2 sources, so it will be automatically disbanded.`
+            : '',
+          deleteUsage ? describeCollectionUsage(deleteUsage) : '',
+        ].filter(Boolean).join('\n\n')}
         confirmText="Delete anyway"
         variant="destructive"
       />
@@ -5198,6 +5216,8 @@ function CatalogsSettingsContent({
         />
       )}
 
+      <ScrollToTopButton hidden={selectionCount > 0} />
+
       {/* Selection Controls */}
       <div className="flex flex-wrap items-center gap-2">
         <SelectAllControl
@@ -5506,6 +5526,14 @@ function CatalogsSettingsContent({
 
           if (skippedCount > 0) {
             message += `\n\nNote: ${skippedCount} non-removable catalog${skippedCount === 1 ? '' : 's'} will be skipped.`;
+          }
+
+          const usage = findCollectionUsage(
+            config.collections,
+            new Set([...mergedSelected, ...catalogsToDelete].map(c => catalogUsageKey(c.id, c.type)))
+          );
+          if (usage.sources > 0) {
+            message += `\n\n${describeCollectionUsage(usage)}`;
           }
 
           return message;

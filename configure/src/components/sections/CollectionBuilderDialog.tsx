@@ -7,6 +7,7 @@ import {
   Copy,
   Download,
   Folder,
+  Info,
   Layers,
   ListOrdered,
   Link as LinkIcon,
@@ -163,6 +164,17 @@ function collectIds(entries: BuilderEntry[]): Set<string> {
   return ids;
 }
 
+function collectSourceKeys(entries: BuilderEntry[]): string[] {
+  const keys: string[] = [];
+  for (const entry of entries) {
+    const sources = entry.kind === 'classicRow'
+      ? (entry.source ? [entry.source] : [])
+      : entry.folders.flatMap(folder => folder.sources);
+    for (const source of sources) keys.push(`${source.catalogId}:${source.type}`);
+  }
+  return keys;
+}
+
 /**
  * An exported design carries its ids, and importing one twice would otherwise
  * seat two entries on the same id: deleting either would take both. Only the
@@ -215,6 +227,12 @@ export function CollectionBuilderDialog({ isOpen, onClose }: CollectionBuilderDi
   const [importPreview, setImportPreview] = useState<ImportResult | null>(null);
   const [confirmReplace, setConfirmReplace] = useState(false);
   const [stagedBlueprints, setStagedBlueprints] = useState<CatalogBlueprint[]>([]);
+  /**
+   * Sources this session brought in. Only these may have a catalog rebuilt from
+   * their id, so a source the user already had stops resurrecting a catalog they
+   * deleted from the config.
+   */
+  const [sessionSourceKeys, setSessionSourceKeys] = useState<Set<string>>(new Set());
   const [convertNative, setConvertNative] = useState(false);
   const [overLimitOpen, setOverLimitOpen] = useState(false);
   const [nativeBlockFor, setNativeBlockFor] = useState<'apply' | 'copy' | 'download' | 'link' | null>(null);
@@ -233,6 +251,7 @@ export function CollectionBuilderDialog({ isOpen, onClose }: CollectionBuilderDi
     setBaseline(JSON.stringify(saved));
     setSelectedId(saved[0]?.id ?? null);
     setStagedBlueprints([]);
+    setSessionSourceKeys(new Set());
     setActiveTab('design');
     setRailQuery('');
     setExpandedIds(new Set(saved[0]?.id ? [saved[0].id] : []));
@@ -824,9 +843,10 @@ export function CollectionBuilderDialog({ isOpen, onClose }: CollectionBuilderDi
       config.catalogs || [],
       stagedBlueprints,
       unknownSources,
-      config.apiKeys || {}
+      config.apiKeys || {},
+      sessionSourceKeys
     ),
-    [config.catalogs, stagedBlueprints, unknownSources, config.apiKeys]
+    [config.catalogs, stagedBlueprints, unknownSources, config.apiKeys, sessionSourceKeys]
   );
 
   const pendingCount = additionCount(pendingAdditions);
@@ -867,6 +887,7 @@ export function CollectionBuilderDialog({ isOpen, onClose }: CollectionBuilderDi
    */
   const convertNativeSources = useCallback((entryId?: string) => {
     const rebuilt: CatalogBlueprint[] = [];
+    const convertedKeys: string[] = [];
     let converted = 0;
     let kept = 0;
 
@@ -886,6 +907,7 @@ export function CollectionBuilderDialog({ isOpen, onClose }: CollectionBuilderDi
               if (result.ok === true) {
                 rebuilt.push(result.blueprint);
                 next = result.source;
+                convertedKeys.push(`${next.catalogId}:${next.type}`);
                 converted += 1;
               } else {
                 kept += 1;
@@ -903,6 +925,7 @@ export function CollectionBuilderDialog({ isOpen, onClose }: CollectionBuilderDi
 
     if (rebuilt.length > 0) {
       setStagedBlueprints(prev => dedupeBlueprints([...prev, ...rebuilt]));
+      setSessionSourceKeys(prev => new Set([...prev, ...convertedKeys]));
     }
 
     if (converted === 0) {
@@ -923,15 +946,16 @@ export function CollectionBuilderDialog({ isOpen, onClose }: CollectionBuilderDi
     [entries]
   );
 
-  const fusionTileLoss = useMemo(() => {
-    const kept = fusionResult.output.widgets.reduce(
+  /** Tiles Fusion still gets, but with nothing in them. A sourceless tile exports. */
+  const fusionEmptyTiles = useMemo(
+    () => fusionResult.output.widgets.reduce(
       (sum, widget) => sum + ('dataSource' in widget && widget.dataSource?.kind === 'collection'
-        ? widget.dataSource.payload.items.length
+        ? widget.dataSource.payload.items.filter(item => item.dataSources.length === 0).length
         : 0),
       0
-    );
-    return Math.max(0, fusionTileTotal - kept);
-  }, [fusionResult, fusionTileTotal]);
+    ),
+    [fusionResult]
+  );
 
   const unsupportedRows = useMemo(() => unsupportedClassicRows(entries), [entries]);
 
@@ -1030,6 +1054,10 @@ export function CollectionBuilderDialog({ isOpen, onClose }: CollectionBuilderDi
     setStagedBlueprints(prev => dedupeBlueprints(
       mode === 'replace' ? importPreview.blueprints : [...prev, ...importPreview.blueprints]
     ));
+    setSessionSourceKeys(prev => {
+      const incomingKeys = collectSourceKeys(incoming);
+      return mode === 'replace' ? new Set(incomingKeys) : new Set([...prev, ...incomingKeys]);
+    });
 
     let mergeNote = '';
     setEntries(prev => {
@@ -1463,6 +1491,24 @@ export function CollectionBuilderDialog({ isOpen, onClose }: CollectionBuilderDi
                 </TabsContent>
 
                 <TabsContent value="json" className="space-y-3 pt-4">
+                  <div className="flex items-start gap-2 rounded-lg border border-sky-600/40 bg-sky-500/5 p-3 text-xs">
+                    <Info className="mt-px h-4 w-4 shrink-0 text-sky-400" />
+                    <div className="space-y-1">
+                      <p className="font-medium text-sky-200">
+                        Saving updates your addon, not {target === 'fusion' ? 'Fusion' : 'Nuvio'}
+                      </p>
+                      <p className="text-muted-foreground">
+                        Nothing is pushed to your app. Import the file or the link below again for these edits to
+                        show up there.
+                      </p>
+                      <p className="text-muted-foreground">
+                        {target === 'fusion'
+                          ? "Fusion adds on import rather than matching what it already has, so re-importing everything gives you duplicate widgets. Delete the widgets you changed first, then tick just those in Fusion's import list. They come back at the end, so you may need to reorder them."
+                          : 'Editing a collection you imported keeps its id, so Nuvio updates the one you already have instead of adding a second copy. Building a new collection from scratch mints a new id and arrives alongside the old one.'}
+                      </p>
+                    </div>
+                  </div>
+
                   <div className="flex flex-wrap items-center gap-2">
                     <Badge
                       variant="outline"
@@ -2077,9 +2123,9 @@ export function CollectionBuilderDialog({ isOpen, onClose }: CollectionBuilderDi
             </DialogTitle>
             <DialogDescription>
               {totalNative} source{totalNative === 1 ? '' : 's'} in this design {totalNative === 1 ? 'is' : 'are'}{' '}
-              fetched by Nuvio itself, and Fusion has no equivalent. {fusionTileLoss > 0
-                ? `${fusionTileLoss} of ${fusionTileTotal} tiles would come out empty.`
-                : 'The tiles using them are left out.'}
+              fetched by Nuvio itself, and Fusion has no equivalent. {fusionEmptyTiles > 0
+                ? `${fusionEmptyTiles} of ${fusionTileTotal} tiles would come out empty.`
+                : 'Those sources are left out of the Fusion export.'}
             </DialogDescription>
           </DialogHeader>
 
