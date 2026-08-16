@@ -83,6 +83,16 @@ function isImdbId(query: string): boolean {
   return imdbIdPattern.test(query.trim());
 }
 
+/**
+ * The age gate at the end of performTvdbSearch drops every result whose certification is
+ * unknown, so the lookup below has to run whenever a rating cap is set, not only when the
+ * rating is also displayed. Every other search provider fills certification unconditionally.
+ */
+function hasAgeRatingCap(config: { ageRating?: unknown }): boolean {
+  const cap = config?.ageRating;
+  return typeof cap === 'string' && cap !== '' && cap.toLowerCase() !== 'none';
+}
+
 const host = (process.env.HOST_NAME as string).startsWith('http')
     ? process.env.HOST_NAME
     : `https://${process.env.HOST_NAME}`;
@@ -147,7 +157,7 @@ async function parseTvdbSearchResult(type: string, extendedRecord: any, language
   let certification: string | null = null;
   let certificationLocal: string | null = null;
   let movieReleaseDates: any = null;
-  if (config.displayAgeRating) {
+  if (config.displayAgeRating || hasAgeRatingCap(config)) {
     try {
       const langParts = language.split('-');
       const userCountry = langParts[1] || langParts[0];
@@ -479,8 +489,8 @@ async function performTmdbSearch(type: string, query: string, language: string, 
       peopleOnly
           ? Promise.resolve({ results: [] })
           : (type === 'movie'
-              ? moviedb.searchMovie({ query, language, include_adult: config.includeAdult, page }, config)
-              : moviedb.searchTv({ query, language, include_adult: config.includeAdult, page }, config)),
+              ? moviedb.searchMovie({ query, language, include_adult: !excludesAdult(config), page }, config)
+              : moviedb.searchTv({ query, language, include_adult: !excludesAdult(config), page }, config)),
 
       shouldSearchPersons
           ? moviedb.searchPerson({ query, language: language }, config).then(async (personRes: any) => {
@@ -678,27 +688,15 @@ async function performTmdbSearch(type: string, query: string, language: string, 
   logger.info(`Hydration complete in ${Date.now() - startTime}ms. Found ${hydratedResults.length} valid items.`);
 
   let keywordFilteredResults;
-  if (config.includeAdult === false) {
-    const adultKeywordBlacklist = ['porn', 'porno', 'soft porn', 'softcore', 'pinku-eiga','erotica', 'erotic film', 'erotic movie', 'adult video'];
-    logger.debug(`Filtering results with adult keyword blacklist as includeAdult is false.`);
+  if (excludesAdult(config)) {
+    // The id branches above reach TMDB through find(), which takes no include_adult,
+    // so a title arriving by imdb id is only caught here.
     keywordFilteredResults = hydratedResults.filter((result: any) => {
-        const keywordsObject = result.details.keywords;
-        if (!keywordsObject) {
-            return true;
-        }
-
-        const keywords = keywordsObject.results || keywordsObject.keywords || [];
-
-        for (const keyword of keywords) {
-            const keywordName = keyword.name.toLowerCase();
-            if (adultKeywordBlacklist.includes(keywordName)) {
-                logger.info(`Item "${result.parsed.name}" was filtered because of keyword "${keyword.name}"`);
-                return false;
-            }
-        }
-        return true;
+        if (!isAdultTmdbItem(result.details)) return true;
+        logger.info(`Item "${result.parsed.name}" was filtered as adult`);
+        return false;
     });
-    logger.debug(`Keyword filtering applied: ${hydratedResults.length} -> ${keywordFilteredResults.length} results.`);
+    logger.debug(`Adult filtering applied: ${hydratedResults.length} -> ${keywordFilteredResults.length} results.`);
   } else {
     keywordFilteredResults = hydratedResults;
   }
@@ -881,6 +879,23 @@ const TV_RATING_HIERARCHY = ['TV-Y', 'TV-Y7', 'TV-G', 'TV-PG', 'TV-14', 'TV-MA']
 const MOVIE_TO_TV_RATING: Record<string, string> = { 'G': 'TV-G', 'PG': 'TV-PG', 'PG-13': 'TV-14', 'R': 'TV-MA', 'NC-17': 'TV-MA' };
 const ADULT_GENRES = new Set(['hentai', 'erotica', 'erotic', 'adult', 'pornographic', 'porn']);
 
+/** TMDB keyword names that mark a title adult when its `adult` flag does not. */
+const ADULT_KEYWORDS = new Set([
+  'porn', 'porno', 'soft porn', 'softcore', 'pinku-eiga',
+  'erotica', 'erotic film', 'erotic movie', 'adult video', 'hentai',
+]);
+
+/** A config that predates the field still filters, since the default is off. */
+function excludesAdult(config: any): boolean {
+  return config?.includeAdult !== true;
+}
+
+function isAdultTmdbItem(details: any): boolean {
+  if (details?.adult === true) return true;
+  const keywords = details?.keywords?.results || details?.keywords?.keywords || [];
+  return keywords.some((keyword: any) => ADULT_KEYWORDS.has(String(keyword?.name || '').toLowerCase()));
+}
+
 /** Mirrors the age filter the TMDB and Trakt paths apply inline. */
 function passesAgeRating(certification: string | null | undefined, type: string, ageRating: string): boolean {
   const isTvRating = type === 'series';
@@ -1045,7 +1060,7 @@ async function performSimklSearch(type: string, query: string, language: string,
     }
   }
 
-  if (config.includeAdult === false) {
+  if (excludesAdult(config)) {
     const beforeCount = metas.length;
     metas = metas.filter((meta: any) => !meta.genres?.some((genre: string) => ADULT_GENRES.has(String(genre).toLowerCase())));
     if (beforeCount !== metas.length) {
@@ -1181,7 +1196,7 @@ async function performTmdbPeopleSearch(type: string, query: string, language: st
       }
     }
 
-    if (config.includeAdult === false) {
+    if (excludesAdult(config)) {
       const beforeAdult = pageResults.length;
       pageResults = pageResults.filter((media: any) => !media.adult);
       if (beforeAdult !== pageResults.length) {
@@ -1255,7 +1270,7 @@ async function matchAndEnrichFromTMDB(suggestion: { title: string; year: string 
     const searchParams = {
       query: title,
       language: 'en-US',
-      include_adult: config.includeAdult || false,
+      include_adult: !excludesAdult(config),
       page: 1
     };
 
@@ -1322,20 +1337,9 @@ async function matchAndEnrichFromTMDB(suggestion: { title: string; year: string 
           include_image_language: imageLanguages
         }, config);
 
-    if (config.includeAdult === false) {
-      const adultKeywordBlacklist = ['porn', 'porno', 'soft porn', 'softcore', 'pinku-eiga'];
-      const keywordsObject = details.keywords;
-
-      if (keywordsObject) {
-        const keywords = keywordsObject.results || keywordsObject.keywords || [];
-
-        for (const keyword of keywords) {
-          if (adultKeywordBlacklist.includes(keyword.name.toLowerCase())) {
-            logger.debug(`Item "${title}" filtered because of blacklist keyword "${keyword.name}"`);
-            return null;
-          }
-        }
-      }
+    if (excludesAdult(config) && isAdultTmdbItem(details)) {
+      logger.debug(`Item "${title}" filtered as adult`);
+      return null;
     }
 
     let allIds: any = {
@@ -1438,7 +1442,7 @@ async function performAiSearch(query: string, language: string, config: any): Pr
       const ollamaUrl = config.apiKeys?.ollamaUrl || 'http://ollama:11434';
       suggestions = await performOllamaSearch(ollamaUrl, query, 'mixed', language, aiModel);
     } else {
-      const geminiKey = config.apiKeys?.gemini;
+      const geminiKey = config.apiKeys?.gemini || process.env.BUILT_IN_GEMINI_API_KEY;
       suggestions = await performGeminiSearch(geminiKey, query, 'mixed', language, aiModel, aiWebSearch);
     }
 

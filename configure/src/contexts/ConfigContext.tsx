@@ -4,6 +4,7 @@ import { compressToEncodedURIComponent, decompressFromEncodedURIComponent } from
 import { allCatalogDefinitions, allSearchProviders } from "@/data/catalogs";
 import { LoadingScreen } from "@/components/LoadingScreen"; 
 import { hasAnyWatchTrackingEnabled } from '@/lib/watchTracking';
+import { reconcileTagRegistry } from '@/lib/catalogShare';
 
 interface AuthState {
   authenticated: boolean;
@@ -21,6 +22,8 @@ interface ConfigContextType {
   setAuth: React.Dispatch<React.SetStateAction<AuthState>>;
   hasBuiltInTvdb: boolean;
   hasBuiltInTmdb: boolean;
+  hasBuiltInMdblist: boolean;
+  hasBuiltInGemini: boolean;
   traktSearchEnabled: boolean;
   simklSearchEnabled: boolean;
   catalogTTL: number;
@@ -327,6 +330,7 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
       }
       // Hydrate search.engineEnabled
       const hydratedEngineEnabled = { ...initialConfig.search.engineEnabled, ...(preloadedConfig.search?.engineEnabled || {}) };
+      const hydratedTags = reconcileTagRegistry(preloadedConfig.tags ?? [], hydratedCatalogs);
       return {
         ...initialConfig,
         ...preloadedConfig,
@@ -376,7 +380,8 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
         },
         mal: { ...initialConfig.mal, ...preloadedConfig.mal },
         tmdb: { ...initialConfig.tmdb, ...preloadedConfig.tmdb },
-        catalogs: hydratedCatalogs,
+        tags: hydratedTags.tags,
+        catalogs: hydratedTags.catalogs,
       };
     }
     return initialConfig;
@@ -384,6 +389,8 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
   const [isLoading, setIsLoading] = useState(true);
   const [hasBuiltInTvdb, setHasBuiltInTvdb] = useState(false);
   const [hasBuiltInTmdb, setHasBuiltInTmdb] = useState(false);
+  const [hasBuiltInMdblist, setHasBuiltInMdblist] = useState(false);
+  const [hasBuiltInGemini, setHasBuiltInGemini] = useState(false);
   const [traktSearchEnabled, setTraktSearchEnabled] = useState(true);
   const [simklSearchEnabled, setSimklSearchEnabled] = useState(true);
   const [catalogTTL, setCatalogTTL] = useState(86400); // Default to 24 hours
@@ -402,6 +409,8 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
         setAddonVersion(envApiKeys.addonVersion || ' ');
         setHasBuiltInTvdb(!!envApiKeys.hasBuiltInTvdb);
         setHasBuiltInTmdb(!!envApiKeys.hasBuiltInTmdb);
+        setHasBuiltInMdblist(!!envApiKeys.hasBuiltInMdblist);
+        setHasBuiltInGemini(!!envApiKeys.hasBuiltInGemini);
         setTraktSearchEnabled(envApiKeys.traktSearchEnabled ?? true);
         setSimklSearchEnabled(envApiKeys.simklSearchEnabled ?? true);
         setCatalogTTL(envApiKeys.catalogTTL || 86400);
@@ -478,7 +487,7 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <ConfigContext.Provider value={{ config, setConfig, addonVersion, resetConfig, auth, setAuth, hasBuiltInTvdb, hasBuiltInTmdb, catalogTTL, maxCatalogs, collectionImportCatalogCap, isLoading, sessionId, setSessionId, traktSearchEnabled, simklSearchEnabled, manifestFingerprint, manifestChangedSinceInstall, markManifestInstalled }}>
+    <ConfigContext.Provider value={{ config, setConfig, addonVersion, resetConfig, auth, setAuth, hasBuiltInTvdb, hasBuiltInTmdb, hasBuiltInMdblist, hasBuiltInGemini, catalogTTL, maxCatalogs, collectionImportCatalogCap, isLoading, sessionId, setSessionId, traktSearchEnabled, simklSearchEnabled, manifestFingerprint, manifestChangedSinceInstall, markManifestInstalled }}>
       {children}
     </ConfigContext.Provider>
   );
