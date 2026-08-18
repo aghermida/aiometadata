@@ -74,6 +74,7 @@ export interface CatalogConfig {
     hideUnreleasedDigital?: boolean;
     identifier?: string;
     url?: string;
+    slug?: string;
     // TMDB-specific metadata
     listId?: string;
     listDescription?: string;

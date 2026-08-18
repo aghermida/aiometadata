@@ -324,6 +324,35 @@ async function createTMDBListCatalog(userCatalog: any, movieGenres: string[] = [
   }
 }
 
+function createTMDBCollectionCatalog(userCatalog: any, movieGenres: string[] = [], showPrefix: boolean = false, prefixName: string = "AIOMetadata"): any {
+  try {
+    logger.debug(`Creating TMDB Collection catalog: ${userCatalog.id}`);
+
+    const catalogType = userCatalog.displayType || 'movie';
+    const genreOptions = movieGenres.length > 0
+      ? (userCatalog.showInHome ? movieGenres : ['None', ...movieGenres])
+      : ['None'];
+
+    const catalog = {
+      id: userCatalog.id,
+      type: catalogType,
+      name: `${showPrefix ? `${prefixName} - ` : ""}${userCatalog.name}`,
+      pageSize: parseInt(process.env.CATALOG_LIST_ITEMS_SIZE as string) || 20,
+      extra: [
+        { name: "genre", options: genreOptions, isRequired: userCatalog.showInHome ? false : true },
+        { name: "skip" },
+      ],
+      showInHome: userCatalog.showInHome
+    };
+
+    logger.debug(`TMDB Collection catalog created successfully: ${catalog.id}`);
+    return catalog;
+  } catch (error: any) {
+    logger.error(`Error creating TMDB Collection catalog ${userCatalog.id}:`, error.message);
+    return null;
+  }
+}
+
 function createTMDBDiscoverCatalog(userCatalog: any, movieGenres: string[] = [], seriesGenres: string[] = [], showPrefix: boolean = false, prefixName: string = "AIOMetadata"): any {
   try {
     logger.debug(`Creating TMDB Discover catalog: ${userCatalog.id} (${userCatalog.type})`);
@@ -384,6 +413,34 @@ function createTVDBDiscoverCatalog(userCatalog: any, genres: string[] = [], show
     return catalog;
   } catch (error: any) {
     logger.error(`Error creating TVDB Discover catalog ${userCatalog.id}:`, error.message);
+    return null;
+  }
+}
+
+function createTVDBListCatalog(userCatalog: any, showPrefix: boolean = false, prefixName: string = "AIOMetadata"): any {
+  try {
+    logger.debug(`Creating TVDB List catalog: ${userCatalog.id} (${userCatalog.type})`);
+
+    const catalogType = userCatalog.displayType || userCatalog.type;
+    const extra: any[] = [];
+    if (!userCatalog.showInHome) {
+      extra.push({ name: "genre", options: ['None'], isRequired: true });
+    }
+    extra.push({ name: "skip" });
+
+    const catalog = {
+      id: userCatalog.id,
+      type: catalogType,
+      name: `${showPrefix ? `${prefixName} - ` : ""}${userCatalog.name}`,
+      pageSize: parseInt(process.env.CATALOG_LIST_ITEMS_SIZE as string) || 20,
+      extra,
+      showInHome: userCatalog.showInHome
+    };
+
+    logger.debug(`TVDB List catalog created successfully: ${catalog.id}`);
+    return catalog;
+  } catch (error: any) {
+    logger.error(`Error creating TVDB List catalog ${userCatalog.id}:`, error.message);
     return null;
   }
 }
@@ -983,7 +1040,13 @@ async function getManifest(config: any, opts: { tag?: string } = {}): Promise<an
       if (userCatalog.id.startsWith('tmdb.discover.')) {
         return true;
       }
+      if (userCatalog.id.startsWith('tmdb.collection.')) {
+        return true;
+      }
       if (userCatalog.id.startsWith('tvdb.discover.')) {
+        return true;
+      }
+      if (userCatalog.id.startsWith('tvdb.list.')) {
         return true;
       }
       if (userCatalog.id.startsWith('mal.discover.')) {
@@ -1068,6 +1131,12 @@ async function getManifest(config: any, opts: { tag?: string } = {}): Promise<an
           logger.debug(`TMDB List catalog result:`, result ? 'success' : 'failed');
           return result;
       }
+      if (userCatalog.id.startsWith('tmdb.collection.')) {
+          logger.debug(`Processing TMDB Collection catalog: ${userCatalog.id}`);
+          const result = createTMDBCollectionCatalog(userCatalog, genres_movie_names, showPrefix, prefixName);
+          logger.debug(`TMDB Collection catalog result:`, result ? 'success' : 'failed');
+          return result;
+      }
       if (userCatalog.id.startsWith('tmdb.discover.')) {
           logger.debug(`Processing TMDB Discover catalog: ${userCatalog.id}`);
           const result = createTMDBDiscoverCatalog(userCatalog, genres_movie_names, genres_series_names, showPrefix, prefixName);
@@ -1078,6 +1147,12 @@ async function getManifest(config: any, opts: { tag?: string } = {}): Promise<an
           logger.debug(`Processing TVDB Discover catalog: ${userCatalog.id}`);
           const result = createTVDBDiscoverCatalog(userCatalog, genres_tvdb_all_names, showPrefix, prefixName);
           logger.debug(`TVDB Discover catalog result:`, result ? 'success' : 'failed');
+          return result;
+      }
+      if (userCatalog.id.startsWith('tvdb.list.')) {
+          logger.debug(`Processing TVDB List catalog: ${userCatalog.id}`);
+          const result = createTVDBListCatalog(userCatalog, showPrefix, prefixName);
+          logger.debug(`TVDB List catalog result:`, result ? 'success' : 'failed');
           return result;
       }
       if (userCatalog.id.startsWith('stremthru.')) {
