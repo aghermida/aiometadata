@@ -1400,7 +1400,12 @@ addon.get("/api/mdblist/user", async (req, res) => {
 });
 
 // Proxy: Get user's lists
-const MDBLIST_LIST_CACHE_TTL = 30 * 60;
+const { envInt } = require('./utils/envNumber');
+
+/** Read per call so a dashboard change lands without a restart. */
+function mdblistListCacheTtl() {
+  return envInt('MDBLIST_LIST_CACHE_TTL', 30 * 60, 0);
+}
 
 /** Keyed per key rather than globally: without a username MDBList returns the caller's own lists. */
 /** The instance key stands in when the caller sends none, same as the catalog paths. */
@@ -1437,7 +1442,7 @@ addon.get("/api/mdblist/lists/user", async (req, res) => {
         const response = await makeRateLimitedMDBListRequest(url, apikey, 'MDBList Proxy - Get User Lists');
         return response.data;
       },
-      MDBLIST_LIST_CACHE_TTL
+      mdblistListCacheTtl()
     );
     res.json(payload);
   } catch (error) {
@@ -1474,7 +1479,7 @@ addon.get("/api/mdblist/lists/search", async (req, res) => {
           totalItems: parseInt(response.headers?.['x-total-items'], 10) || 0,
         };
       },
-      MDBLIST_LIST_CACHE_TTL
+      mdblistListCacheTtl()
     );
     res.json(payload);
   } catch (error) {
@@ -1534,7 +1539,7 @@ addon.get("/api/mdblist/lists/:listId/items", async (req, res) => {
           poster: item.poster || null,
         }));
       },
-      MDBLIST_LIST_CACHE_TTL
+      mdblistListCacheTtl()
     );
 
     res.json({ items });
@@ -1569,7 +1574,7 @@ addon.get("/api/mdblist/lists/:username/:listname", async (req, res) => {
 addon.get("/api/mdblist/lists/:listId", async (req, res) => {
   try {
     const { listId } = req.params;
-    const { apikey } = req.query;
+    const apikey = resolveMdblistKey(req.query.apikey);
     
     if (!apikey) {
       return res.status(400).json({ error: "apikey is required" });
