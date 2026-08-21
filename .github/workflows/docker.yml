@@ -28,9 +28,25 @@ jobs:
           git remote add upstream https://github.com/cedya77/aiometadata.git
           git fetch upstream
           if ! git merge upstream/dev --no-edit; then
-            git merge --abort
-            echo "::error::Merge conflict syncing dev with upstream/dev. Resolve manually via a PR."
-            exit 1
+            # Files intentionally removed from this fork: if upstream keeps
+            # modifying them, auto-resolve by keeping them deleted.
+            conflicts=$(git diff --name-only --diff-filter=U)
+            unresolved=""
+            for f in $conflicts; do
+              case "$f" in
+                .github/workflows/docker-release.yml|.github/workflows/release-please.yml) ;;
+                *) unresolved="$unresolved $f" ;;
+              esac
+            done
+            if [ -n "$unresolved" ]; then
+              git merge --abort
+              echo "::error::Merge conflict syncing dev with upstream/dev in:$unresolved. Resolve manually via a PR."
+              exit 1
+            fi
+            for f in $conflicts; do
+              git rm -f "$f"
+            done
+            git commit --no-edit
           fi
           git push origin dev
 
