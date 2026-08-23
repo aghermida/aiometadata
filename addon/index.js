@@ -14,7 +14,8 @@ const { applyCatalogFilters, catalogFiltersActive } = require("./utils/catalogFi
 const { cursorKey, resolveStartPage, writeCursor, fillFilteredPage } = require("./lib/catalogPagination");
 const anilist = require("./lib/anilist");
 const { getSearch } = require("./lib/getSearch");
-const { getManifest, DEFAULT_LANGUAGE } = require("./lib/getManifest");
+const { getManifest, resolveManifestTags, DEFAULT_LANGUAGE } = require("./lib/getManifest");
+const { resolveRatingOverride } = require("./utils/ageRating");
 const { getMeta } = require("./lib/getMeta");
 const { cacheWrapMetaSmart, cacheWrapCatalog, cacheWrapSearch, cacheWrapJikanApi, cacheWrapStaticCatalog, cacheWrapGlobal, getCacheHealth, clearCacheHealth, logCacheHealth, stableStringify, deleteKeysByPattern, scanKeys } = require("./lib/getCache");
 const { hasPermission } = require("./lib/authSession");
@@ -427,6 +428,25 @@ const getCacheHeaders = function (opts) {
   return headerParts.length > 0 ? headerParts.join(", ") : false;
 };
 
+/**
+ * A cap named by the install URL, so one UUID can serve both an unrestricted and a
+ * family install. Copied rather than assigned onto the config, because concurrent
+ * loads for the same user are coalesced and hand back the same object.
+ */
+function applyRatingOverride(config, req, userUUID) {
+  const raw = req.query.contentrating ?? req.query.contentRating;
+  if (raw === undefined) return config;
+
+  const { rating, requested, refused } = resolveRatingOverride(config, raw);
+  if (refused.length > 0) {
+    consola.warn(`[Rating] User ${userUUID} asked for ${refused.join(', ')}, which is not a rating below their configured ${config.ageRating || 'None'}`);
+  }
+  if (!rating) return config;
+
+  consola.debug(`[Rating] User ${userUUID} capped at ${rating} for this install (configured ${config.ageRating || 'None'}, asked ${requested.join(', ')})`);
+  return { ...config, ageRating: rating, _ratingOverride: rating };
+}
+
 const respond = function (req, res, data, opts) {
   // Store minimal tracking data in res.locals for success detection
   if (req.path.includes('/catalog/') && data && data.metas) {
@@ -454,8 +474,10 @@ const respond = function (req, res, data, opts) {
         etagContent += ':manifest';
       }
 
-      if (typeof req.query.tag === 'string' && req.query.tag.trim()) {
-        etagContent += ':tag:' + req.query.tag.trim().toLowerCase();
+      // Set by the manifest route once the query has been resolved, so the validator
+      // follows the profiles that were actually built rather than the raw query.
+      if (Array.isArray(req.manifestTags) && req.manifestTags.length > 0) {
+        etagContent += ':tags:' + req.manifestTags.map((t) => t.toLowerCase()).join(',');
       }
 
       const etagHash = crypto.createHash('md5').update(etagContent).digest('hex');
@@ -4045,9 +4067,20 @@ addon.get("/stremio/:userUUID/manifest.json", async function (req, res) {
             return res.status(404).send({ err: "User configuration not found." });
         }
         
-        const tag = typeof req.query.tag === 'string' ? req.query.tag.trim() : '';
-        consola.debug(`[Manifest] Building fresh manifest for user: ${userUUID}${tag ? ` (tag: ${tag})` : ''}`);
-        const manifest = await getManifest(config, { tag });
+        const { tags, unknown: unknownTags } = resolveManifestTags(config, req.query.tag);
+        req.manifestTags = tags;
+        // The cap itself applies to catalog and search requests, not to the manifest.
+        // It is resolved here anyway so an install URL can be checked before it is used.
+        const rawRating = req.query.contentrating ?? req.query.contentRating;
+        const { rating: ratingOverride, refused: refusedRatings } = resolveRatingOverride(config, rawRating);
+        if (refusedRatings.length > 0) {
+            consola.warn(`[Manifest] User ${userUUID} asked for ${refusedRatings.join(', ')}, which is not a rating below their configured ${config.ageRating || 'None'}`);
+        }
+        consola.debug(`[Manifest] Building fresh manifest for user: ${userUUID}${tags.length ? ` (tags: ${tags.join(', ')})` : ''}`);
+        if (unknownTags.length > 0) {
+            consola.warn(`[Manifest] User ${userUUID} asked for ${unknownTags.join(', ')}, which no catalog is tagged with`);
+        }
+        const manifest = await getManifest(config, { tags });
             if (!manifest) {
                 res.setHeader('Access-Control-Allow-Origin', '*');
                 res.setHeader('Access-Control-Allow-Headers', '*');
@@ -4076,9 +4109,17 @@ addon.get("/stremio/:userUUID/manifest.json", async function (req, res) {
         manifest._debug = {
             language: config.language || DEFAULT_LANGUAGE,
             configVersion: config.configVersion || Date.now(),
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString(),
+            ...(tags.length > 0 ? { tags } : {}),
+            ...(unknownTags.length > 0 ? { unknownTags } : {}),
+            ...(ratingOverride ? { contentRating: ratingOverride } : {}),
+            ...(refusedRatings.length > 0 ? { refusedContentRating: refusedRatings } : {})
         };
         
+        if (ratingOverride) {
+            manifest.name = `${manifest.name} · ${ratingOverride}`;
+        }
+
         // Add a timestamp to force cache invalidation
         manifest._timestamp = Date.now();
         
@@ -4102,11 +4143,12 @@ addon.get("/stremio/:userUUID/manifest.json", async function (req, res) {
 // --- Catalog Route under /stremio/:userUUID prefix ---
 addon.get("/stremio/:userUUID/catalog/:type/:id{/:extra}.json", async function (req, res) {
   const { userUUID, type, id, extra } = req.params;
-  const config = await loadConfigFromDatabase(userUUID);
+  const storedConfig = await loadConfigFromDatabase(userUUID);
   
-  if (!config) {
+  if (!storedConfig) {
     return res.status(404).send({ error: "User configuration not found" });
   }
+  const config = applyRatingOverride(storedConfig, req, userUUID);
   config.userUUID = userUUID;
 
   // Handle calendar-videos catalog
