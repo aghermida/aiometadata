@@ -8,6 +8,15 @@ on:
     - cron: '0 6 * * *'
   workflow_dispatch:
 
+# The sync step below fetches, merges and pushes to `dev` non-atomically.
+# Without this, an overlapping schedule/push/dispatch run can race on the
+# final `git push origin dev` and fail with "fetch first" (see run #99,
+# 2026-08-21). Only one sync-and-build run at a time; queue the rest
+# instead of dropping them.
+concurrency:
+  group: sync-and-build-dev
+  cancel-in-progress: false
+
 jobs:
   sync-and-build:
     runs-on: ubuntu-latest
@@ -27,27 +36,48 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote add upstream https://github.com/cedya77/aiometadata.git
           git fetch upstream
+
+          # Files this fork deletes or fully replaces relative to upstream.
+          # See CLAUDE.md > "Fork sync conventions" for the rule this
+          # implements: upstream keeps evolving these files on its own, so a
+          # plain `git merge` always hits a modify/delete conflict here —
+          # that is expected, not a real conflict to investigate. Whenever
+          # you delete or replace a file that still exists upstream, add its
+          # path below with a one-line reason so the nightly sync survives
+          # upstream's future edits to it without another firefighting PR
+          # (this is what broke the sync repeatedly on 2026-08-19/21, fixed
+          # in PR #12).
+          FORK_DELETED_UPSTREAM_FILES=(
+            ".github/workflows/docker-release.yml"  # superseded by this file's own build+push job
+            ".github/workflows/release-please.yml"  # this fork does not use release-please versioning
+          )
+
           if ! git merge upstream/dev --no-edit; then
-            # Files intentionally removed from this fork: if upstream keeps
-            # modifying them, auto-resolve by keeping them deleted.
             conflicts=$(git diff --name-only --diff-filter=U)
             unresolved=""
             for f in $conflicts; do
-              case "$f" in
-                .github/workflows/docker-release.yml|.github/workflows/release-please.yml) ;;
-                *) unresolved="$unresolved $f" ;;
-              esac
+              known=0
+              for known_f in "${FORK_DELETED_UPSTREAM_FILES[@]}"; do
+                if [ "$f" = "$known_f" ]; then
+                  known=1
+                  break
+                fi
+              done
+              [ "$known" -eq 0 ] && unresolved="$unresolved $f"
             done
+
             if [ -n "$unresolved" ]; then
               git merge --abort
               echo "::error::Merge conflict syncing dev with upstream/dev in:$unresolved. Resolve manually via a PR."
               exit 1
             fi
+
             for f in $conflicts; do
               git rm -f "$f"
             done
             git commit --no-edit
           fi
+
           git push origin dev
 
       - name: Log in to GitHub Container Registry
