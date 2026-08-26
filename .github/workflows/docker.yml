@@ -5,7 +5,7 @@ on:
     branches:
       - dev
   schedule:
-    - cron: '0 6 * * *'
+    - cron: '0 6 * * 1'
   workflow_dispatch:
 
 # The sync step below fetches, merges and pushes to `dev` non-atomically.
