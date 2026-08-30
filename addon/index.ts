@@ -995,6 +995,40 @@ addon.post("/api/movielens/sync/:userUUID", async (req, res) => {
   }
 });
 
+// --- Force-refresh cached data for external addon ("custom"/"stremthru") catalogs ---
+// This only clears the on-demand cache for those catalogs; the normal 24h automatic
+// TTL is untouched and keeps working as before for everything else.
+addon.post("/api/catalogs/refresh-cache/:userUUID", async (req, res) => {
+  try {
+    const { userUUID } = req.params;
+    const { password, catalogId } = req.body || {};
+    const access = await resolveConfigAccess(req, userUUID, password);
+    if (!access) {
+      return res.status(401).json({ error: "Invalid UUID or password" });
+    }
+    const config = access.config;
+    const externalCatalogs = (config.catalogs || []).filter((c: any) =>
+      (c.id?.startsWith('custom.') || c.id?.startsWith('stremthru.')) &&
+      (!catalogId || c.id === catalogId)
+    );
+    if (externalCatalogs.length === 0) {
+      return res.status(400).json({ error: "No matching external addon catalogs found." });
+    }
+
+    let keysDeleted = 0;
+    for (const catalog of externalCatalogs) {
+      keysDeleted += await deleteKeysByPattern(`*custom-batch:${catalog.id}:*`);
+      keysDeleted += await deleteKeysByPattern(`catalog-cursor*:${userUUID}:${catalog.id}:*`);
+    }
+
+    consola.info(`[Catalogs] Force-refreshed cache for ${userUUID}: ${externalCatalogs.length} catalog(s), ${keysDeleted} key(s) cleared`);
+    res.json({ success: true, catalogsCleared: externalCatalogs.length, keysDeleted });
+  } catch (error) {
+    consola.error("[Catalogs] Refresh cache error:", error);
+    res.status(500).json({ error: "Could not refresh catalog cache. Please try again." });
+  }
+});
+
 addon.post("/api/movielens/lists/:userUUID", async (req, res) => {
   try {
     const { userUUID } = req.params;

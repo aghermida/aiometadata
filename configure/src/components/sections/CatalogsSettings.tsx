@@ -27,7 +27,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { Eye, EyeOff, Home, GripVertical, RefreshCw, Trash2, Pencil, Settings, ExternalLink, Star, Shuffle, Link, Wand2, Upload, Download, Trophy, Database, Copy, MoreHorizontal, Sparkles } from 'lucide-react';
+import { Eye, EyeOff, Home, GripVertical, RefreshCw, Trash2, Pencil, Settings, ExternalLink, Star, Shuffle, Link, Wand2, Upload, Download, Trophy, Database, Copy, MoreHorizontal, Sparkles, Zap } from 'lucide-react';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogClose, DialogDescription } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -3945,7 +3945,8 @@ function CatalogsSettingsContent({
   tagFilters: string[];
   setTagFilters: React.Dispatch<React.SetStateAction<string[]>>;
 }) {
-  const { config, setConfig, hasBuiltInTvdb, hasBuiltInGemini } = useConfig();
+  const { config, setConfig, hasBuiltInTvdb, hasBuiltInGemini, auth } = useConfig();
+  const [isRefreshingExternalCache, setIsRefreshingExternalCache] = useState(false);
   const {
     selectAll,
     deselectAll,
@@ -4332,6 +4333,37 @@ function CatalogsSettingsContent({
         catalogs: hydratedCatalogs,
       };
     });
+  };
+
+  // Forces an immediate re-fetch of external addon ("custom"/"stremthru") catalogs,
+  // bypassing the normal 24h cache. That automatic TTL is left untouched for
+  // everything else — this only clears the cache for these on demand.
+  const handleForceRefreshExternalCache = async () => {
+    if (!auth.userUUID) return;
+    const externalCount = config.catalogs.filter(
+      c => c.id.startsWith('custom.') || c.id.startsWith('stremthru.')
+    ).length;
+    if (externalCount === 0) {
+      toast.info('No external addon catalogs to refresh');
+      return;
+    }
+    setIsRefreshingExternalCache(true);
+    try {
+      const response = await fetch(`/api/catalogs/refresh-cache/${auth.userUUID}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: auth.password }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.error || 'Could not refresh catalog cache');
+      }
+      toast.success(`Refreshed ${data.catalogsCleared} external catalog${data.catalogsCleared === 1 ? '' : 's'} — next load will fetch fresh data`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not refresh catalog cache');
+    } finally {
+      setIsRefreshingExternalCache(false);
+    }
   };
 
   // Get selected catalogs for bulk actions
@@ -5271,6 +5303,22 @@ function CatalogsSettingsContent({
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent>Refresh catalogs to look for updates</TooltipContent>
+                </Tooltip>
+
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={handleForceRefreshExternalCache}
+                      disabled={isRefreshingExternalCache}
+                      aria-label="Force-refresh external catalogs"
+                      className="h-9 w-9"
+                    >
+                      <Zap className={cn("w-5 h-5", isRefreshingExternalCache && "animate-pulse")} />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Force-refresh external addon catalogs now (bypasses the 24h cache just this once)</TooltipContent>
                 </Tooltip>
               </div>
             </TooltipProvider>
