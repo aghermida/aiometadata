@@ -42,6 +42,7 @@ function parsePositiveIntEnv(envValue: any, defaultValue: number, minValue: numb
 
 
 const { withEpoch, withGlobalEpoch }: any = require('./cacheEpoch');
+const { clampTtlToWarmWindow }: any = require('./catalogWarmWindow');
 const {
   isRefreshAheadEnabled,
   isDueForRefresh,
@@ -949,15 +950,39 @@ function getMetaSmartLockContextHash(config: any, metaId: string, type: string |
   });
 }
 
-function buildMetaComponentCacheKeys({ config, metaId, type, useShowPoster = false }: { config: any; metaId: string; type: string | null; useShowPoster?: boolean }): Record<string, string> {
-  const ctx = getMetaCacheContext(config, metaId, type, useShowPoster);
-  const commonProvider = {
+function metaIdentityProfile(ctx: any, config: any): any {
+  return {
     ...ctx.base,
     metaProvider: ctx.metaProvider,
     animeIdProvider: ctx.animeIdProvider,
     providerOptions: ctx.providerOptions,
     showMetaProviderAttribution: config.showMetaProviderAttribution || false,
   };
+}
+
+/**
+ * Components are keyed by the id a meta resolved to, while later reads ask by the
+ * id they started from. The alias records that hop.
+ *
+ * The hash carries idResolution because the anime path leaves
+ * useImdbIdForCatalogAndSearch out of the identity profile. It stays out of the
+ * component keys, where moving commonHash would orphan every stored component.
+ */
+function buildMetaAliasCacheKey({ config, metaId, type, useShowPoster = false }: { config: any; metaId: string; type: string | null; useShowPoster?: boolean }): string {
+  const ctx = getMetaCacheContext(config, metaId, type, useShowPoster);
+  const profile = {
+    ...metaIdentityProfile(ctx, config),
+    idResolution: {
+      useImdbIdForCatalogAndSearch: config.mal?.useImdbIdForCatalogAndSearch || false,
+      forceAnimeForDetectedImdb: config.providers?.forceAnimeForDetectedImdb || false,
+    },
+  };
+  return `meta-alias:${hashProfile(profile)}:${metaId}`;
+}
+
+function buildMetaComponentCacheKeys({ config, metaId, type, useShowPoster = false }: { config: any; metaId: string; type: string | null; useShowPoster?: boolean }): Record<string, string> {
+  const ctx = getMetaCacheContext(config, metaId, type, useShowPoster);
+  const commonProvider = metaIdentityProfile(ctx, config);
   const artCommon = {
     ...ctx.base,
     metaProvider: ctx.metaProvider,
@@ -1393,92 +1418,36 @@ async function cacheWrapCatalog(userUUID: string, catalogKey: string, method: ()
     cacheLogger.debug(`[Catalog] Using extended cache TTL for decade catalog ${idOnly}: 30 days`);
   }
 
-  if (idOnly.startsWith('mdblist.')) {
+  // One override chain for every source that lets a catalog carry its own TTL. A
+  // catalog with no `cacheTTL` follows CATALOG_TTL, so moving the instance default
+  // reaches it; 0 means the caller asked for no caching at all.
+  const ttlOverrideSources: Array<{ label: string; matches: boolean; min?: number; floorDefault?: boolean }> = [
+    { label: 'MDBList', matches: idOnly.startsWith('mdblist.') },
+    { label: 'Trakt', matches: idOnly.startsWith('trakt.') },
+    { label: 'MAL user list', matches: idOnly.startsWith('mal.userlist.') || idOnly === 'mal.suggestions' },
+    { label: 'Simkl trending', matches: idOnly.startsWith('simkl.trending.') || idOnly.startsWith('simkl.recipe.'), min: 3600, floorDefault: true },
+    { label: 'Simkl watchlist', matches: idOnly.startsWith('simkl.watchlist.') || idOnly.startsWith('simkl.upnext') },
+    { label: 'Letterboxd', matches: idOnly.startsWith('letterboxd.') },
+    { label: 'custom manifest', matches: idOnly.startsWith('custom.') },
+    { label: 'AniList', matches: idOnly.startsWith('anilist.') },
+    { label: 'PublicMetaDB', matches: idOnly.startsWith('publicmetadb.') },
+    { label: 'SimKL', matches: idOnly.startsWith('simkl.') },
+    { label: 'discover', matches: isDiscoverCatalog },
+  ];
+
+  const ttlSource = ttlOverrideSources.find(source => source.matches);
+  if (ttlSource) {
     const catCfg = config.catalogs?.find((c: any) => c.id === idOnly);
-    if (Number.isFinite(catCfg?.cacheTTL) && catCfg.cacheTTL >= 0) {
-      cacheTTL = catCfg.cacheTTL;
+    const override = Number.isFinite(catCfg?.cacheTTL) && catCfg.cacheTTL >= 0 ? catCfg.cacheTTL : undefined;
+    if (override !== undefined) {
+      cacheTTL = ttlSource.min ? Math.max(override, ttlSource.min) : override;
       cachingDisabled = cacheTTL === 0;
       cacheLogger.debug(cachingDisabled
-        ? `[Catalog] Caching disabled for MDBList catalog ${idOnly}`
-        : `[Catalog] Using custom cache TTL for MDBList catalog ${idOnly}: ${cacheTTL}s`);
-    }
-  }
-
-  if (idOnly.startsWith('trakt.')) {
-    const catCfg = config.catalogs?.find((c: any) => c.id === idOnly);
-    if (catCfg?.cacheTTL) {
-      cacheTTL = catCfg.cacheTTL;
-      cacheLogger.debug(`[Catalog] Using custom cache TTL for Trakt catalog ${idOnly}: ${cacheTTL}s`);
-    }
-  }
-
-  if (idOnly.startsWith('mal.userlist.') || idOnly === 'mal.suggestions') {
-    const catCfg = config.catalogs?.find((c: any) => c.id === idOnly);
-    if (catCfg?.cacheTTL) {
-      cacheTTL = catCfg.cacheTTL;
-      cacheLogger.debug(`[Catalog] Using custom cache TTL for MAL user list catalog ${idOnly}: ${cacheTTL}s`);
-    }
-  }
-
-  if (idOnly.startsWith('simkl.trending.') || idOnly.startsWith('simkl.recipe.')) {
-    const catCfg = config.catalogs?.find((c: any) => c.id === idOnly);
-    cacheTTL = Math.max(catCfg?.cacheTTL || CATALOG_TTL(), 3600);
-    cacheLogger.debug(`[Catalog] Using cache TTL for Simkl catalog ${idOnly}: ${cacheTTL}s`);
-  }
-
-  if (idOnly.startsWith('simkl.watchlist.') || idOnly.startsWith('simkl.upnext')) {
-    const catCfg = config.catalogs?.find((c: any) => c.id === idOnly);
-    if (catCfg?.cacheTTL) {
-      cacheTTL = catCfg.cacheTTL;
-      cacheLogger.debug(`[Catalog] Using custom cache TTL for Simkl watchlist catalog ${idOnly}: ${cacheTTL}s`);
-    }
-  }
-
-  if (idOnly.startsWith('letterboxd.')) {
-    const catCfg = config.catalogs?.find((c: any) => c.id === idOnly);
-    if (catCfg?.cacheTTL) {
-      cacheTTL = catCfg.cacheTTL;
-      cacheLogger.debug(`[Catalog] Using custom cache TTL for Letterboxd catalog ${idOnly}: ${cacheTTL}s`);
-    }
-  }
-
-  if (idOnly.startsWith('custom.')) {
-    const catCfg = config.catalogs?.find((c: any) => c.id === idOnly);
-    if (catCfg?.cacheTTL) {
-      cacheTTL = catCfg.cacheTTL;
-      cacheLogger.debug(`[Catalog] Using custom cache TTL for custom manifest catalog ${idOnly}: ${cacheTTL}s`);
-    }
-  }
-
-  if (idOnly.startsWith('anilist.')) {
-    const catCfg = config.catalogs?.find((c: any) => c.id === idOnly);
-    if (catCfg?.cacheTTL) {
-      cacheTTL = catCfg.cacheTTL;
-      cacheLogger.debug(`[Catalog] Using custom cache TTL for AniList catalog ${idOnly}: ${cacheTTL}s`);
-    }
-  }
-
-  if (idOnly.startsWith('publicmetadb.')) {
-    const catCfg = config.catalogs?.find((c: any) => c.id === idOnly);
-    if (catCfg?.cacheTTL) {
-      cacheTTL = catCfg.cacheTTL;
-      cacheLogger.debug(`[Catalog] Using custom cache TTL for PublicMetaDB catalog ${idOnly}: ${cacheTTL}s`);
-    }
-  }
-
-  if (idOnly.startsWith('simkl.')) {
-    const catCfg = config.catalogs?.find((c: any) => c.id === idOnly);
-    if (catCfg?.cacheTTL) {
-      cacheTTL = catCfg.cacheTTL;
-      cacheLogger.debug(`[Catalog] Using custom cache TTL for SimKL catalog ${idOnly}: ${cacheTTL}s`);
-    }
-  }
-
-  if (isDiscoverCatalog) {
-    const catCfg = config.catalogs?.find((c: any) => c.id === idOnly);
-    if (catCfg?.cacheTTL) {
-      cacheTTL = catCfg.cacheTTL;
-      cacheLogger.debug(`[Catalog] Using custom cache TTL for discover catalog ${idOnly}: ${cacheTTL}s`);
+        ? `[Catalog] Caching disabled for ${ttlSource.label} catalog ${idOnly}`
+        : `[Catalog] Using custom cache TTL for ${ttlSource.label} catalog ${idOnly}: ${cacheTTL}s`);
+    } else if (ttlSource.floorDefault && ttlSource.min) {
+      cacheTTL = Math.max(cacheTTL, ttlSource.min);
+      cacheLogger.debug(`[Catalog] Using cache TTL for ${ttlSource.label} catalog ${idOnly}: ${cacheTTL}s`);
     }
   }
 
@@ -1534,11 +1503,18 @@ async function cacheWrapCatalog(userUUID: string, catalogKey: string, method: ()
       cacheLogger.debug(`[Catalog] HIT detail (${idOnly}) [sig:${catalogSig}] catalogConfig:${catalogConfigString} catalogKey:${catalogKey}`);
     },
   };
+  // The key keeps the configured TTL so it stays stable across runs; only the
+  // lifetime written to Redis is held inside the warm window.
+  const writeTTL = cachingDisabled ? cacheTTL : await clampTtlToWarmWindow(userUUID, cacheTTL);
+  if (writeTTL !== cacheTTL) {
+    cacheLogger.debug(`[Catalog] Holding ${idOnly} to ${writeTTL}s so it lapses before the next warm run (configured ${cacheTTL}s)`);
+  }
+
   const result = cachingDisabled
     ? normalizeReleaseAvailabilityInPayload(await method())
     : await cacheWrap(key, async () => {
         return normalizeReleaseAvailabilityInPayload(await method());
-      }, cacheTTL, options);
+      }, writeTTL, options);
   normalizeReleaseAvailabilityInPayload(result);
 
   if (result?.metas?.length) {
@@ -1924,6 +1900,26 @@ async function writeMetaComponentsBatchWithConfig({ config, metas, ttl = META_TT
   return { written, skipped };
 }
 
+async function readMetaAlias({ config, metaId, type = null, useShowPoster = false }: { config: any; metaId: string; type?: string | null; useShowPoster?: boolean }): Promise<string | null> {
+  if (!redis) return null;
+  try {
+    const aliased = await redis.get(withEpoch(buildMetaAliasCacheKey({ config, metaId, type, useShowPoster })));
+    return typeof aliased === 'string' && aliased ? aliased : null;
+  } catch (error: any) {
+    cacheLogger.warn(`[Meta] Alias read failed for ${metaId}: ${error?.message}`);
+    return null;
+  }
+}
+
+async function writeMetaAlias({ config, metaId, aliasTo, ttl = META_TTL(), type = null, useShowPoster = false }: { config: any; metaId: string; aliasTo: string; ttl?: number; type?: string | null; useShowPoster?: boolean }): Promise<void> {
+  if (!redis || !metaId || !aliasTo || metaId === aliasTo) return;
+  try {
+    await redis.set(withEpoch(buildMetaAliasCacheKey({ config, metaId, type, useShowPoster })), aliasTo, 'EX', ttl);
+  } catch (error: any) {
+    cacheLogger.warn(`[Meta] Alias write failed for ${metaId} -> ${aliasTo}: ${error?.message}`);
+  }
+}
+
 async function reconstructMetaFromComponents(userUUID: string, metaId: string, ttl: number = META_TTL(), options: any = {}, type: string | null = null, includeVideos: boolean = true, useShowPoster: boolean = false): Promise<any> {
    if (!metaId || typeof metaId !== 'string') {
      cacheLogger.warn(`Invalid metaId provided: ${metaId}`);
@@ -1952,7 +1948,7 @@ async function reconstructMetaFromComponents(userUUID: string, metaId: string, t
   });
 }
 
-async function reconstructMetaFromComponentsWithConfig({ config, metaId, type = null, includeVideos = true, useShowPoster = false, countColdStoreMiss = true }: { config: any; metaId: string; type?: string | null; includeVideos?: boolean; useShowPoster?: boolean; countColdStoreMiss?: boolean }): Promise<any> {
+async function reconstructMetaFromComponentsWithConfig({ config, metaId, type = null, includeVideos = true, useShowPoster = false, countColdStoreMiss = true, followAlias = true }: { config: any; metaId: string; type?: string | null; includeVideos?: boolean; useShowPoster?: boolean; countColdStoreMiss?: boolean; followAlias?: boolean }): Promise<any> {
   if (!metaId || typeof metaId !== 'string') {
     cacheLogger.warn(`Invalid metaId provided: ${metaId}`);
     return { errorReason: 'invalid metaId' };
@@ -2030,6 +2026,21 @@ async function reconstructMetaFromComponentsWithConfig({ config, metaId, type = 
   const availableComponents = componentResults.filter((result: any) => result.data !== null);
 
   if (availableComponents.length === 0) {
+    if (followAlias) {
+      const aliasedId = await readMetaAlias({ config, metaId, type, useShowPoster });
+      if (aliasedId && aliasedId !== metaId) {
+        return reconstructMetaFromComponentsWithConfig({
+          config,
+          metaId: aliasedId,
+          type,
+          includeVideos,
+          useShowPoster,
+          countColdStoreMiss,
+          followAlias: false,
+        });
+      }
+    }
+
     const metaReconstructionKey = `meta:reconstructed:${metaId}`;
     updateCacheHealth(metaReconstructionKey, 'miss', true);
     return { errorReason: 'no cached components' };
@@ -2277,6 +2288,8 @@ async function cacheWrapMetaSmart(userUUID: string, metaId: string, method: () =
     if(metaId.startsWith('tun_')){
       idToCache = metaId;
     }
+
+    await writeMetaAlias({ config, metaId, aliasTo: idToCache, ttl, type, useShowPoster });
 
     return writeMetaComponentsWithConfig({
       config,
@@ -2540,6 +2553,7 @@ export {
   cacheWrapMetaComponents,
   reconstructMetaFromComponents,
   buildMetaComponentCacheKeys,
+  buildMetaAliasCacheKey,
   projectMetaForCatalogCache,
   projectCatalogPayloadForCache,
   writeMetaComponentsBatchWithConfig,
@@ -2572,6 +2586,7 @@ module.exports = {
   cacheWrapMetaComponents,
   reconstructMetaFromComponents,
   buildMetaComponentCacheKeys,
+  buildMetaAliasCacheKey,
   projectMetaForCatalogCache,
   projectCatalogPayloadForCache,
   writeMetaComponentsBatchWithConfig,
