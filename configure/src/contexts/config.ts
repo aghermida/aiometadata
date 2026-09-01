@@ -218,7 +218,6 @@ export interface AppConfig {
     topPoster: string;
     mdblist: string;
     openrouter: string;
-    ollamaUrl?: string;
     traktTokenId?: string;
     simklTokenId?: string;
     anilistTokenId?: string;
@@ -299,7 +298,7 @@ export interface AppConfig {
       [engine: string]: boolean;
     };
     // AI search provider and model
-    ai_provider?: 'gemini' | 'openrouter' | 'ollama';
+    ai_provider?: 'gemini' | 'openrouter';
     ai_model?: string;
     // Gemini google_search grounding tool. Off unless set.
     ai_web_search?: boolean;

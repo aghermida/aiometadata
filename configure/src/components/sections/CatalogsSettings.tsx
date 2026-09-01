@@ -4245,9 +4245,10 @@ function CatalogsSettingsContent({
     });
   };
 
-  // Forces an immediate re-fetch of external addon ("custom"/"stremthru") catalogs,
-  // bypassing the normal 24h cache. That automatic TTL is left untouched for
-  // everything else — this only clears the cache for these on demand.
+  // [FORK-90002] Forces an immediate re-fetch of external addon ("custom"/"stremthru")
+  // catalogs, bypassing the normal 24h cache. That automatic TTL is left untouched for
+  // everything else — this only clears the cache for these on demand. Backend route
+  // lives in addon/index.ts under the "FORK-ONLY ROUTES" section (same ID).
   const handleForceRefreshExternalCache = async () => {
     if (!auth.userUUID) return;
     const externalCount = config.catalogs.filter(
