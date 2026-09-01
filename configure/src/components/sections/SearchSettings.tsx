@@ -169,20 +169,8 @@ export function SearchSettings() {
   const [editType, setEditType] = useState('');
   const hasGeminiKey = !!config.apiKeys?.gemini || hasBuiltInGemini;
   const hasOpenRouterKey = !!config.apiKeys?.openrouter;
-  const hasAnyAiKey = hasGeminiKey || hasOpenRouterKey || true; // Ollama is always available (no key needed)
+  const hasAnyAiKey = hasGeminiKey || hasOpenRouterKey;
   const { models: openRouterModels, loading: openRouterModelsLoading } = useOpenRouterModels(config.apiKeys?.openrouter);
-  const [ollamaModels, setOllamaModels] = useState<{ id: string; name: string }[]>([]);
-  const [ollamaModelsLoading, setOllamaModelsLoading] = useState(false);
-
-  const fetchOllamaModels = () => {
-    const url = config.apiKeys?.ollamaUrl || 'http://ollama:11434';
-    setOllamaModelsLoading(true);
-    fetch(`/api/ollama/models?url=${encodeURIComponent(url)}`)
-      .then(res => res.json())
-      .then(data => setOllamaModels(data?.models || []))
-      .catch(() => setOllamaModels([]))
-      .finally(() => setOllamaModelsLoading(false));
-  };
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
@@ -336,10 +324,8 @@ export function SearchSettings() {
     }));
   };
 
-  const handleAiProviderChange = (provider: 'gemini' | 'openrouter' | 'ollama') => {
-    const defaultModel = provider === 'openrouter' ? DEFAULT_OPENROUTER_MODEL :
-                         provider === 'ollama' ? 'llama3.2' :
-                         DEFAULT_GEMINI_MODEL;
+  const handleAiProviderChange = (provider: 'gemini' | 'openrouter') => {
+    const defaultModel = provider === 'openrouter' ? DEFAULT_OPENROUTER_MODEL : DEFAULT_GEMINI_MODEL;
     setConfig(prev => ({
       ...prev,
       search: {
@@ -598,8 +584,11 @@ export function SearchSettings() {
                     description="Choose your AI provider"
                     control={
                       <Select
-                        value={config.search.ai_provider || 'gemini'}
-                        onValueChange={(value) => handleAiProviderChange(value as 'gemini' | 'openrouter' | 'ollama')}
+                        // [FORK-90005] Explicit fallback (not `|| 'gemini'`) so a legacy
+                        // saved ai_provider: 'ollama' value resolves to a real option
+                        // instead of leaving the Select showing nothing selected.
+                        value={config.search.ai_provider === 'openrouter' ? 'openrouter' : 'gemini'}
+                        onValueChange={(value) => handleAiProviderChange(value as 'gemini' | 'openrouter')}
                       >
                         <SelectTrigger id="ai-provider" aria-label="AI provider" className="w-full sm:w-[200px]">
                           <SelectValue />
@@ -611,47 +600,10 @@ export function SearchSettings() {
                           <SelectItem value="openrouter" disabled={!hasOpenRouterKey}>
                             OpenRouter{!hasOpenRouterKey ? ' (no key)' : ''}
                           </SelectItem>
-                          <SelectItem value="ollama">
-                            Ollama (self-hosted)
-                          </SelectItem>
                         </SelectContent>
                       </Select>
                     }
                   />
-
-                  {(config.search.ai_provider || 'gemini') === 'ollama' && (
-                    <SettingRow
-                      htmlFor="ollama-url"
-                      label="Instance URL"
-                      description="OpenAI-compatible endpoint (/v1 is appended automatically if missing)"
-                      control={
-                        <div className="flex gap-2 w-full sm:w-auto">
-                          <Input
-                            id="ollama-url"
-                            value={config.apiKeys?.ollamaUrl ?? 'http://ollama:11434'}
-                            onChange={(e) => {
-                              setConfig(prev => ({
-                                ...prev,
-                                apiKeys: { ...prev.apiKeys, ollamaUrl: e.target.value }
-                              }));
-                              setOllamaModels([]);
-                            }}
-                            placeholder="http://ollama:11434"
-                            className="flex-1 sm:w-[200px]"
-                          />
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onClick={fetchOllamaModels}
-                            disabled={ollamaModelsLoading}
-                          >
-                            {ollamaModelsLoading ? 'Loading...' : 'Fetch models'}
-                          </Button>
-                        </div>
-                      }
-                    />
-                  )}
 
                   <SettingRow
                     htmlFor="ai-model"
@@ -659,8 +611,6 @@ export function SearchSettings() {
                     description={
                       (config.search.ai_provider || 'gemini') === 'openrouter'
                         ? `Any OpenRouter model ID, ${config.search.ai_openrouter_web_search !== false ? 'with Web Search' : 'without Web Search'}`
-                        : (config.search.ai_provider || 'gemini') === 'ollama'
-                        ? 'Model available on your instance'
                         : (() => {
                             const selected = GEMINI_MODELS.find(m => m.id === resolveGeminiModel(config.search.ai_model));
                             return (selected?.grounding || config.search.ai_web_search) ? 'with Web Search' : 'without Web Search';
@@ -683,32 +633,6 @@ export function SearchSettings() {
                             ))}
                           </datalist>
                         </>
-                      ) : (config.search.ai_provider || 'gemini') === 'ollama' ? (
-                        ollamaModels.length > 0 ? (
-                          <Select
-                            value={config.search.ai_model ?? ''}
-                            onValueChange={handleAiModelChange}
-                          >
-                            <SelectTrigger id="ai-model" aria-label="AI model" className="w-full sm:w-[280px]">
-                              <SelectValue placeholder={ollamaModelsLoading ? 'Loading models...' : 'Select a model'} />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {ollamaModels.map(model => (
-                                <SelectItem key={model.id} value={model.id}>
-                                  {model.name}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        ) : (
-                          <Input
-                            id="ai-model"
-                            value={config.search.ai_model ?? ''}
-                            onChange={(e) => handleAiModelChange(e.target.value)}
-                            placeholder={ollamaModelsLoading ? 'Loading models...' : 'llama3.2, phi4, mistral...'}
-                            className="w-full sm:w-[280px]"
-                          />
-                        )
                       ) : (
                         <Select
                           value={resolveGeminiModel(config.search.ai_model)}

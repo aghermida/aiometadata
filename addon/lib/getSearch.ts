@@ -15,7 +15,6 @@ const { resolveAllIds }: any = require('./id-resolver');
 const { isAnime }: any = require("../utils/isAnime");
 const { performGeminiSearch, resolveGeminiModel }: any = require('../utils/gemini-service');
 const { performOpenRouterSearch }: any = require('../utils/openrouter-service');
-const { performOllamaSearch }: any = require('../utils/ollama-service');
 const { filterMetasByRegex }: any = require('../utils/regexFilter');
 import consola from 'consola';
 import { tmdbImageUrl, tmdbLogoSize, tmdbBackdropSize, tmdbPosterSize } from '../utils/tmdbImageSize';
@@ -1350,19 +1349,18 @@ async function matchAndEnrichFromTMDB(suggestion: { title: string; year: string 
 
 async function performAiSearch(query: string, language: string, config: any): Promise<any[]> {
   const startTime = Date.now();
-  const aiProvider = config.search?.ai_provider || 'gemini';
+  // [FORK-90005] Normalize explicitly (rather than `|| 'gemini'`) so a legacy
+  // saved config with the now-removed ai_provider: 'ollama' falls back to
+  // Gemini predictably instead of leaking an invalid model name into the API call.
+  const aiProvider = config.search?.ai_provider === 'openrouter' ? 'openrouter' : 'gemini';
   const aiModel = aiProvider === 'openrouter'
     ? (config.search?.ai_model || 'google/gemini-2.5-flash')
-    : aiProvider === 'ollama'
-    ? (config.search?.ai_model || 'llama3.2')
     : resolveGeminiModel(config.search?.ai_model);
   const aiWebSearch = aiProvider === 'openrouter'
     ? config.search?.ai_openrouter_web_search !== false
-    : aiProvider === 'ollama'
-    ? false
     : config.search?.ai_web_search === true;
 
-  logger.info(`Starting AI search for query: "${query}" (provider: ${aiProvider}, model: ${aiModel}, webSearch: ${aiProvider === 'ollama' ? 'never' : aiWebSearch})`);
+  logger.info(`Starting AI search for query: "${query}" (provider: ${aiProvider}, model: ${aiModel}, webSearch: ${aiWebSearch})`);
 
   try {
     let suggestions: any[];
@@ -1373,9 +1371,6 @@ async function performAiSearch(query: string, language: string, config: any): Pr
         ? (aiModel.endsWith(':online') ? aiModel : `${aiModel}:online`)
         : aiModel.replace(/:online$/, '');
       suggestions = await performOpenRouterSearch(openrouterKey, query, 'mixed', language, effectiveModel);
-    } else if (aiProvider === 'ollama') {
-      const ollamaUrl = config.apiKeys?.ollamaUrl || 'http://ollama:11434';
-      suggestions = await performOllamaSearch(ollamaUrl, query, 'mixed', language, aiModel);
     } else {
       const geminiKey = config.apiKeys?.gemini || process.env.BUILT_IN_GEMINI_API_KEY;
       suggestions = await performGeminiSearch(geminiKey, query, 'mixed', language, aiModel, aiWebSearch);
