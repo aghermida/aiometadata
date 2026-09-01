@@ -2,6 +2,8 @@
 
 This file gives a new Claude session everything it needs to understand this codebase without re-exploring it. Keep it up to date when architecture changes.
 
+**Before touching any fork-only code, or removing/restructuring it, read `CLAUDE.md` at the repo root first** — its "Fork sync conventions" and "Required checklist when removing or restructuring fork-only code" sections are imperative, not optional background.
+
 ---
 
 ## Project Overview
@@ -34,16 +36,24 @@ This file gives a new Claude session everything it needs to understand this code
 
 ```
 addon/
-  index.js          Main Express monolith (~6000+ lines) — all routes, middleware, API logic
-  server.ts         Entry point — starts DB, Redis, mappers, then calls index.js
+  index.ts          Main Express monolith (~8000 lines) — all routes, middleware, API logic.
+                    Fork-only blocks inside it are tagged `// [FORK-9xxxx]` — grep for that
+                    prefix to find every one regardless of line numbers.
+  server.ts         Entry point — starts DB, Redis, mappers, then calls index.ts
   lib/              Mappers, caching helpers, API clients
+    landingPage.ts  [FORK-ONLY] HTML templating for the "/" landing route — kept out of
+                    index.ts so that route's body stays a one-line delegating call
   types/            TypeScript type definitions
   utils/            Shared utility functions
 
 configure/src/
-  App.tsx           React entry — reads window flags, branches to the correct page component
+  App.tsx           React entry — reads window flags, branches to the correct page component.
+                    Fork-only gating (landing mode + admin auth wall) is a single call to
+                    useForkGate(), not inlined here — see components/ForkGate.tsx
   main.tsx          ReactDOM.render — wraps with QueryClientProvider → ThemeProvider → ConfigProvider → AdminProvider
   components/
+    ForkGate.tsx      [FORK-ONLY] useForkGate() hook — decides whether to render LandingPage,
+                      a loading screen, or AdminAuthGate instead of the normal app
     layout/
       Header.tsx    Top nav: logo, addon name editor, Dashboard button, user login/logout
     dashboard/
@@ -57,9 +67,9 @@ configure/src/
       DashboardUsers.tsx      User management (admin only)
       DashboardSettings.tsx   Server settings
       DashboardPerformance.tsx Performance metrics
-    LandingPage.tsx   Landing page (shown at /)
-    AdminAuthGate.tsx Blocking auth modal for /configure and /dashboard
-    LoadingScreen.tsx Skeleton loading screen
+    LandingPage.tsx   [FORK-ONLY] Landing page (shown at /), rendered via ForkGate.tsx
+    AdminAuthGate.tsx [FORK-ONLY] Blocking auth modal for /configure and /dashboard, rendered via ForkGate.tsx
+    LoadingScreen.tsx Skeleton loading screen (upstream component, reused by ForkGate.tsx)
     SettingsLayout.tsx  Main configure layout (desktop tabs / mobile accordion)
     ui/               shadcn/ui primitive components (Button, Input, Dialog, Card, etc.)
   contexts/
@@ -88,10 +98,10 @@ Express serves a **single React SPA** from `dist/client/index.html`. Different "
 | `GET /stremio/:uuid/rating` | Read + modify HTML | `window.RATING_MODE = true` | rating UI |
 
 **Pattern for adding a new page mode:**
-1. Add an Express route in `addon/index.js` that reads `clientIndexPath`, injects `window.NEW_MODE = true` before `</head>`, and sends the result
-2. Add `const isNewMode = !!(window as any).NEW_MODE;` near the top of `AppContent` in `App.tsx`
-3. Early-return the new component when the flag is set
-4. Create the component under `configure/src/components/`
+1. Put the HTML-templating logic (read `clientIndexPath`, inject `window.NEW_MODE = true` before `</head>`) in a new fork-only file under `addon/lib/` (see `landingPage.ts`) — don't inline it in `index.ts`. Register the route in `index.ts` as a one-line delegating call, tagged `// [FORK-9xxxx]` per the convention in `CLAUDE.md`.
+2. Add the flag check inside `useForkGate()` (`configure/src/components/ForkGate.tsx`), not directly in `App.tsx` — keep `App.tsx`'s own diff to nothing.
+3. Return the new component from `useForkGate()` when the flag is set.
+4. Create the component under `configure/src/components/`.
 
 ---
 
