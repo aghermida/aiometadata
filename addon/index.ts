@@ -116,9 +116,42 @@ const MAL_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 const { createResponseCompression } = require('./utils/responseCompression');
 addon.use(createResponseCompression());
 
-// Parse JSON and URL-encoded bodies for API routes
-addon.use(express.json({ limit: '2mb' }));
+// Parse JSON and URL-encoded bodies for API routes.
+// The parser mounts before settings load, so the limit is resolved per request
+// rather than captured here, and a parser is kept per distinct limit.
+const jsonBodyParsers = new Map();
+
+function jsonBodyParserFor(limit) {
+  let parser = jsonBodyParsers.get(limit);
+  if (!parser) {
+    parser = express.json({ limit });
+    jsonBodyParsers.set(limit, parser);
+  }
+  return parser;
+}
+
+addon.use((req, res, next) => {
+  let limit;
+  try {
+    limit = getSetting('MAX_REQUEST_BODY_SIZE');
+  } catch {
+    limit = '';
+  }
+  return jsonBodyParserFor(limit || '8mb')(req, res, next);
+});
 addon.use(express.urlencoded({ extended: true }));
+
+// Express reports an oversized body as an HTML stack, which reaches the setup
+// page as an unreadable failure rather than as the ceiling it is.
+addon.use((err, req, res, next) => {
+  if (err?.type !== 'entity.too.large') return next(err);
+  consola.warn(`[Request] Body over the ${err.limit} byte limit on ${req.method} ${req.path}`);
+  return res.status(413).json({
+    error: 'Configuration is too large to send in one request. An instance administrator can raise Max Request Body Size in the dashboard settings.',
+    limit: err.limit,
+    length: err.length ?? null,
+  });
+});
 
 // Global CORS middleware: ensure every response includes CORS headers
 // This prevents browser blocks when a route returns early or on errors
@@ -2847,6 +2880,94 @@ addon.get("/api/mdblist/discover/preview", async (req, res) => {
     return res.status(500).json({ error: error.message });
   }
 });
+
+/**
+ * First page of a catalog, trimmed to what a preview tile needs.
+ *
+ * The collection builder drew grey placeholders because the browser has no way to
+ * read a catalog: the addon routes answer a media client, and the providers behind
+ * them want keys the browser must never hold. This goes through getCatalog, so the
+ * page it returns is the same one the catalog route would serve and lands in the
+ * same cache rather than a second one.
+ */
+async function collectionPreviewHandler(req: any, res: any) {
+  try {
+    const input = { ...(req.query || {}), ...(req.body || {}) };
+    const userUUID = String(input.userUUID || '').trim();
+    const id = String(input.id || '').trim();
+    const type = String(input.type || '').trim();
+    const genre = String(input.genre || '').trim() || null;
+    const limit = Math.min(Math.max(parseInt(String(input.limit || '12'), 10) || 12, 1), 24);
+
+    if (!id || !type) {
+      return res.status(400).json({ error: "id and type are required" });
+    }
+
+    // A configuration that has never been saved has nothing to look up, which is
+    // the normal state for someone still setting one up. The instance's own keys
+    // stand in, so a catalog from a provider the instance can reach still previews.
+    const storedConfig = userUUID ? await loadConfigFromDatabase(userUUID) : null;
+    const config: any = storedConfig
+      ? { ...storedConfig, userUUID }
+      : { apiKeys: {}, catalogs: [], language: 'en-US' };
+
+    // Same resolution the catalog route runs: a display type renames the id with a
+    // suffix, and the type to fetch with is the config's own, not the manifest's.
+    const suffix = id.match(/_(movie|series|anime|all)$/)?.[1];
+    const stripped = id.replace(/_(movie|series|anime|all)$/, '');
+    const byId = (candidateId: string, candidateType?: string) => config.catalogs?.find((c: any) =>
+      c.id === candidateId && (candidateType ? c.type === candidateType : (c.type === type || c.displayType === type)));
+    const catalogConfig = byId(id)
+      || (stripped !== id && suffix ? byId(stripped, suffix) : null)
+      || (stripped !== id ? byId(stripped) : null);
+
+    // A catalog the builder has staged but not applied is not in the saved config,
+    // and that is exactly when a preview is worth most. The caller may hand over the
+    // definition it would create, which is used for this read only and never stored.
+    let effective = catalogConfig;
+    if (!effective && input.catalog && typeof input.catalog === 'object') {
+      const offered: any = input.catalog;
+      if (offered.id === id || offered.id === stripped) {
+        effective = { ...offered, enabled: true };
+        config.catalogs = [...(config.catalogs || []), effective];
+      }
+    }
+    if (!effective) {
+      return res.json({ metas: [], reason: storedConfig ? 'unsaved' : 'no-config' });
+    }
+
+    const result = await getCatalog(
+      effective.type,
+      config.language || 'en-US',
+      1,
+      effective.id,
+      genre,
+      config,
+      userUUID,
+      false
+    );
+
+    const metas = (result?.metas || []).slice(0, limit).map((meta: any) => ({
+      id: meta.id,
+      name: meta.name,
+      poster: meta.poster || null,
+      imdbRating: meta.imdbRating || null,
+    }));
+
+    consola.withTag('CollectionPreview').debug(
+      `${effective.id} (${effective.type}) -> ${metas.length} metas${catalogConfig ? '' : ' [staged]'}`
+    );
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    return res.json({ metas });
+  } catch (error: any) {
+    consola.withTag('CollectionPreview').warn(`Preview failed: ${error.message}`);
+    return res.status(500).json({ error: "Could not read that catalog" });
+  }
+}
+
+addon.get("/api/collections/preview", collectionPreviewHandler);
+// POST carries the definition of a catalog that is staged but not yet saved.
+addon.post("/api/collections/preview", collectionPreviewHandler);
 
 // --- Trakt Proxy Endpoints ---
 // These proxy frontend Trakt calls through the backend rate limiter

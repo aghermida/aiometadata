@@ -21,6 +21,10 @@ const {
   normalizeMetaReleaseAvailability,
   normalizeReleaseAvailabilityInPayload,
 }: any = require('../utils/releaseAvailability');
+const {
+  normalizeMetaCredits,
+  normalizeCreditsInPayload,
+}: any = require('../utils/metaCredits');
 
 function hashConfig(configObj: any): string {
   const str = typeof configObj === 'string' ? configObj : stableStringify(configObj);
@@ -43,6 +47,7 @@ function parsePositiveIntEnv(envValue: any, defaultValue: number, minValue: numb
 
 const { withEpoch, withGlobalEpoch }: any = require('./cacheEpoch');
 const { clampTtlToWarmWindow }: any = require('./catalogWarmWindow');
+const { clampMetaTtlToAirWindow }: any = require('./metaAirWindow');
 const {
   isRefreshAheadEnabled,
   isDueForRefresh,
@@ -51,6 +56,7 @@ const {
   getRefreshAheadStats,
   resetRefreshAheadStats,
 }: any = require('./cacheRefreshAhead');
+const { sourceRefetchRequested }: any = require('./cacheSourceRefetch');
 
 function META_TTL() { return parseInt(process.env.META_TTL || String(7 * 24 * 60 * 60), 10); }
 function CATALOG_TTL() { return parseInt(process.env.CATALOG_TTL || String(1 * 24 * 60 * 60), 10); }
@@ -642,19 +648,23 @@ async function cacheWrapGlobal(key: string, method: () => Promise<any>, ttl: num
     return method();
   }
 
-  const { upstream = false } = options;
+  const { upstream = false, sourceList = false } = options;
   const epochKey = upstream ? `global:${key}` : withGlobalEpoch(key);
-  return singleFlight(epochKey, () => cacheWrapGlobalInternal(key, method, ttl, options, epochKey));
+  // A refetch must not join a plain read already in flight, or it returns the
+  // cached value it was meant to replace.
+  const refetch = sourceList && sourceRefetchRequested();
+  const flightKey = refetch ? `refetch:${epochKey}` : epochKey;
+  return singleFlight(flightKey, () => cacheWrapGlobalInternal(key, method, ttl, options, epochKey, refetch));
 }
 
-async function cacheWrapGlobalInternal(key: string, method: () => Promise<any>, ttl: number, options: any, versionedKey: string): Promise<any> {
+async function cacheWrapGlobalInternal(key: string, method: () => Promise<any>, ttl: number, options: any, versionedKey: string, refetch: boolean = false): Promise<any> {
   const { enableErrorCaching = false, resultClassifier = classifyResult, maxRetries = SELF_HEALING_CONFIG.maxRetries } = options;
 
   let retries = 0;
 
   while (retries <= maxRetries) {
   try {
-    const cached = await redis.getBuffer(versionedKey);
+    const cached = refetch ? null : await redis.getBuffer(versionedKey);
     if (cached) {
         try {
           const parsed = await decodeCachePayload(cached);
@@ -1151,6 +1161,7 @@ function applyTrailerStreamsProjection(meta: any): any {
 
 async function projectMetaForUser(meta: any, config: any): Promise<any> {
   if (!meta) return meta;
+  normalizeMetaCredits(meta);
   applyTrailerStreamsProjection(meta);
   applyCastCountProjection(meta, config);
   applyBlurThumbProjection(meta, config);
@@ -1437,7 +1448,7 @@ async function cacheWrapCatalog(userUUID: string, catalogKey: string, method: ()
 
   const ttlSource = ttlOverrideSources.find(source => source.matches);
   if (ttlSource) {
-    const catCfg = config.catalogs?.find((c: any) => c.id === idOnly);
+    const catCfg = catalogFromConfig || config.catalogs?.find((c: any) => c.id === idOnly);
     const override = Number.isFinite(catCfg?.cacheTTL) && catCfg.cacheTTL >= 0 ? catCfg.cacheTTL : undefined;
     if (override !== undefined) {
       cacheTTL = ttlSource.min ? Math.max(override, ttlSource.min) : override;
@@ -1516,25 +1527,10 @@ async function cacheWrapCatalog(userUUID: string, catalogKey: string, method: ()
         return normalizeReleaseAvailabilityInPayload(await method());
       }, writeTTL, options);
   normalizeReleaseAvailabilityInPayload(result);
+  normalizeCreditsInPayload(result);
 
   if (result?.metas?.length) {
-    const displayAgeRating = config.displayAgeRating || false;
-    for (const meta of result.metas) {
-      const cert = meta.app_extras?.certification;
-      if (!cert) continue;
-      const displayCert = meta.app_extras?.certificationLocal || cert;
-      const hasCertLink = meta.links?.some((l: any) => (l.name === cert || l.name === displayCert) && l.category === 'Genres');
-      if (displayAgeRating && !hasCertLink) {
-        if (!Array.isArray(meta.links)) meta.links = [];
-        const imdbId = meta.id?.match(/^tt\d+/)?.[0] || meta.imdb_id;
-        const url = imdbId
-          ? `https://www.imdb.com/title/${imdbId}/parentalguide/`
-          : `https://www.themoviedb.org/movie/${meta.id}`;
-        meta.links.unshift({ name: displayCert, category: 'Genres', url });
-      } else if (!displayAgeRating && hasCertLink) {
-        meta.links = meta.links.filter((l: any) => !((l.name === cert || l.name === displayCert) && l.category === 'Genres'));
-      }
-    }
+    for (const meta of result.metas) applyDisplayAgeRatingProjection(meta, config);
   }
 
   await applyImdbRatingProjectionToList(result?.metas);
@@ -1852,7 +1848,12 @@ async function writeMetaComponentsWithConfig({ config, metaId, result, ttl = MET
      queueComponentCache(componentsToCache, componentCacheKeys.extras, { app_extras: extrasForCache });
    }
 
-  await cacheComponentsPipeline(componentsToCache, ttl, { overwrite });
+  const airWindowTtl = clampMetaTtlToAirWindow(meta, ttl);
+  if (airWindowTtl !== ttl) {
+    cacheLogger.debug(`[Meta] Holding ${metaId} to ${airWindowTtl}s so it lapses after the next episode airs (base ${ttl}s)`);
+  }
+
+  await cacheComponentsPipeline(componentsToCache, airWindowTtl, { overwrite });
 
   try {
     const coldStore = require('./metaColdStore');
