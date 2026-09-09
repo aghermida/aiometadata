@@ -8,7 +8,7 @@ AIOMetadata is a personal fork of [`cedya77/aiometadata`](https://github.com/ced
 
 ## Fork sync conventions (read before touching `.github/workflows/` or deleting/renaming any file)
 
-`.github/workflows/docker.yml` merges `upstream/dev` (`cedya77/aiometadata`) into `dev` every 3 days (cron), on every push, and on manual dispatch, then pushes the result and builds/publishes the Docker image. For this automation to keep working with **zero manual intervention**, the merge must apply cleanly every single time — it only fails when a fork-only change touches something upstream is still actively evolving on its own.
+`.github/workflows/docker.yml` merges `upstream/dev` (`cedya77/aiometadata`) into `dev` Mondays/Wednesdays/Fridays at 05:00 Europe/Madrid (cron), on every push, and on manual dispatch, then pushes the result and builds/publishes the Docker image. For this automation to keep working with **zero manual intervention**, the merge must apply cleanly every single time — it only fails when a fork-only change touches something upstream is still actively evolving on its own.
 
 This exact thing already happened once: this fork deleted `.github/workflows/docker-release.yml` and `.github/workflows/release-please.yml` (consolidated into this fork's own `docker.yml`), but upstream kept modifying both files, so every nightly sync hit a `modify/delete` conflict and failed (2026-08-19 to 2026-08-21, fixed in PR #12). Follow these rules so it doesn't happen again, for any file:
 
