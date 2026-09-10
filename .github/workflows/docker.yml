@@ -4,7 +4,9 @@ on:
   # Automatic sync (push + schedule) disabled 2026-09-10: aiometadata.sandokan.dev
   # now runs ghcr.io/cedya77/aiometadata:latest directly, so this fork's own
   # image is no longer deployed anywhere. Kept as workflow_dispatch only, in
-  # case the fork needs to be rebuilt manually in the future.
+  # case the fork needs to be rebuilt manually in the future. (Note: a
+  # concurrent commit on `dev` changed the schedule to Mon/Wed/Fri right
+  # before this merged — moot now since the schedule is removed entirely.)
   workflow_dispatch:
 
 # The sync step below fetches, merges and pushes to `dev` non-atomically.
