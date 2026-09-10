@@ -1,3 +1,4 @@
+import type { JSX } from 'react';
 import { useAdmin } from '../contexts/AdminContext';
 import { Toaster } from "@/components/ui/sonner";
 import { LandingPage } from './LandingPage';
